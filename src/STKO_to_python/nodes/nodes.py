@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any, Dict, Optional, Sequence, Tuple, Union
 import re
 
@@ -11,10 +12,38 @@ if TYPE_CHECKING:
     from ..core.dataset import MPCODataSet
     from ..results.nodal_results_dataclass import NodalResults
 
+logger = logging.getLogger(__name__)
 
-class Nodes:
+
+def _flatten_node_ids(
+    node_ids: Union[int, Sequence[Any], np.ndarray],
+) -> np.ndarray:
+    """Flatten scalar / 1-D / nested-sequence node IDs into a 1-D int64 array.
+
+    Preserves legacy behavior: ``[[1,2],[3]]`` is a valid input and yields
+    ``[1, 2, 3]``. A bare ``int`` becomes ``[int]``.
     """
-    High-performance MPCO nodal reader.
+    if isinstance(node_ids, (int, np.integer)):
+        return np.asarray([int(node_ids)], dtype=np.int64)
+    arr = np.asarray(node_ids, dtype=object)
+    if arr.dtype == object:
+        flat: list[int] = []
+        for x in node_ids:  # type: ignore[union-attr]
+            if isinstance(x, (list, tuple, np.ndarray)):
+                flat.extend(int(v) for v in x)
+            else:
+                flat.append(int(x))
+        return np.asarray(flat, dtype=np.int64)
+    return np.asarray(node_ids, dtype=np.int64)
+
+
+class NodeManager:
+    """
+    High-performance MPCO nodal reader and domain manager.
+
+    Canonical name for the refactored Layer 3 domain manager. The legacy
+    name ``Nodes`` is preserved as an alias at the bottom of this module
+    for back-compat; new code should prefer ``NodeManager``.
 
     Public API:
         - _get_all_nodes_ids()
@@ -55,11 +84,12 @@ class Nodes:
         """
         dtype = self._node_dtype()
         stage0 = self.dataset.model_stages[0]
+        policy = self.dataset._format_policy
         chunks: list[np.ndarray] = []
 
-        for file_id, path in self.dataset.results_partitions.items():
-            with h5py.File(path, "r") as h5:
-                g = h5.get(self.dataset.MODEL_NODES_PATH.format(model_stage=stage0))
+        for file_id in self.dataset.results_partitions:
+            with self.dataset._pool.with_partition(file_id) as h5:
+                g = h5.get(policy.model_nodes_path(stage0))
                 if g is None:
                     continue
 
@@ -140,74 +170,6 @@ class Nodes:
             return (results,)
         return tuple(results)
 
-    @staticmethod
-    def _normalize_selection_names(
-        selection_set_name: Union[str, Sequence[str], None],
-    ) -> Tuple[str, ...]:
-        if selection_set_name is None:
-            return ()
-        if isinstance(selection_set_name, str):
-            return (selection_set_name,)
-        return tuple(selection_set_name)
-
-    def _selection_set_name_for(self, sid: int) -> str:
-        """
-        Best-effort extraction of selection set name from dataset.selection_set[sid].
-        Supports common key variants.
-        """
-        d = self.dataset.selection_set.get(int(sid), {})
-        if not isinstance(d, dict):
-            return ""
-        name = d.get("SET_NAME", d.get("name", d.get("Name", "")))
-        return "" if name is None else str(name)
-
-    def _selection_set_ids_from_names(self, names: Sequence[str]) -> Tuple[int, ...]:
-        """
-        Resolve selection set names -> IDs (case-insensitive match).
-
-        Raises if:
-          - a name matches nothing
-          - a name matches multiple IDs (ambiguous)
-        """
-        if not names:
-            return ()
-
-        # Build lookup: normalized name -> [ids]
-        buckets: Dict[str, list[int]] = {}
-        for sid in self.dataset.selection_set.keys():
-            try:
-                sid_i = int(sid)
-            except Exception:
-                continue
-            nm = self._selection_set_name_for(sid_i)
-            key = nm.strip().lower()
-            if not key:
-                continue
-            buckets.setdefault(key, []).append(sid_i)
-
-        resolved: list[int] = []
-        for raw in names:
-            key = str(raw).strip().lower()
-            if not key:
-                continue
-
-            hits = buckets.get(key, [])
-            if len(hits) == 0:
-                available = sorted(buckets.keys())
-                preview = ", ".join(available[:30]) + (" ..." if len(available) > 30 else "")
-                raise ValueError(
-                    f"Selection set name not found: {raw!r}. "
-                    f"Available (normalized) names include: {preview}"
-                )
-            if len(hits) > 1:
-                raise ValueError(
-                    f"Ambiguous selection set name {raw!r}: matches IDs {sorted(hits)}. "
-                    f"Use selection_set_id instead."
-                )
-            resolved.append(hits[0])
-
-        return tuple(resolved)
-
     def _resolve_node_ids(
         self,
         *,
@@ -215,48 +177,13 @@ class Nodes:
         selection_set_id: Union[int, Sequence[int], None],
         selection_set_name: Union[str, Sequence[str], None],
     ) -> np.ndarray:
-        gathered: list[np.ndarray] = []
-
-        # ---- selection_set_name -> selection_set_id(s)
-        name_list = self._normalize_selection_names(selection_set_name)
-        if name_list:
-            ids_from_names = self._selection_set_ids_from_names(name_list)
-            for sid in ids_from_names:
-                nodes = self.dataset.selection_set.get(int(sid), {}).get("NODES")
-                if not nodes:
-                    raise ValueError(f"Selection set {sid} empty or missing NODES.")
-                gathered.append(np.asarray(nodes, dtype=np.int64))
-
-        # ---- selection_set_id(s)
-        if selection_set_id is not None:
-            sel_ids = [selection_set_id] if isinstance(selection_set_id, int) else selection_set_id
-            for sid in sel_ids:
-                nodes = self.dataset.selection_set.get(int(sid), {}).get("NODES")
-                if not nodes:
-                    raise ValueError(f"Selection set {sid} empty or missing NODES.")
-                gathered.append(np.asarray(nodes, dtype=np.int64))
-
-        # ---- explicit node_ids
-        if node_ids is not None:
-            if isinstance(node_ids, (int, np.integer)):
-                gathered.append(np.asarray([node_ids], dtype=np.int64))
-            else:
-                arr = np.asarray(node_ids, dtype=object)
-                if arr.dtype == object:
-                    flat = []
-                    for x in node_ids:  # type: ignore
-                        flat.extend(x if isinstance(x, (list, tuple, np.ndarray)) else [x])
-                    gathered.append(np.asarray(flat, dtype=np.int64))
-                else:
-                    gathered.append(np.asarray(node_ids, dtype=np.int64))
-
-        if not gathered:
-            raise ValueError("Provide node_ids and/or selection_set_id and/or selection_set_name.")
-
-        out = np.unique(np.concatenate(gathered))
-        if out.size == 0:
-            raise ValueError("Resolved node set is empty.")
-        return out
+        resolver = self.dataset._selection_resolver
+        explicit = _flatten_node_ids(node_ids) if node_ids is not None else None
+        return resolver.resolve_nodes(
+            names=selection_set_name,
+            ids=selection_set_id,
+            explicit_ids=explicit,
+        )
 
     def _node_file_map(self, node_ids: np.ndarray) -> pd.DataFrame:
         df = self._ensure_node_index_df()
@@ -344,7 +271,41 @@ class Nodes:
         selection_set_id: Union[int, Sequence[int], None] = None,
         selection_set_name: Union[str, Sequence[str], None] = None,
     ) -> "NodalResults":
+        """Route through the dataset-owned query engine so every call
+        benefits from the LRU cache. Thin wrapper; the actual read lives
+        in :meth:`_fetch_nodal_results_uncached`.
+        """
+        engine = getattr(self.dataset, "_nodal_query_engine", None)
+        if engine is not None:
+            return engine.fetch(
+                results_name=results_name,
+                model_stage=model_stage,
+                node_ids=node_ids,
+                selection_set_id=selection_set_id,
+                selection_set_name=selection_set_name,
+            )
+        # Fallback: engines may not yet be wired if this runs during
+        # ``__init__`` bootstrap.
+        return self._fetch_nodal_results_uncached(
+            results_name=results_name,
+            model_stage=model_stage,
+            node_ids=node_ids,
+            selection_set_id=selection_set_id,
+            selection_set_name=selection_set_name,
+        )
 
+    def _fetch_nodal_results_uncached(
+        self,
+        *,
+        results_name: Union[str, Sequence[str], None] = None,
+        model_stage: Union[str, Sequence[str], None] = None,
+        node_ids: Union[int, Sequence[int], Sequence[Sequence[int]], np.ndarray, None] = None,
+        selection_set_id: Union[int, Sequence[int], None] = None,
+        selection_set_name: Union[str, Sequence[str], None] = None,
+    ) -> "NodalResults":
+        """Uncached read path — used by the engine and by the public
+        ``get_nodal_results`` fallback when no engine is attached.
+        """
         stages = self._normalize_stages(model_stage, self.dataset.model_stages)
         results = self._normalize_results(results_name)
 
@@ -370,7 +331,7 @@ class Nodes:
         for st in stages:
             file_frames = []
             for fid, grp in file_groups.items():
-                with h5py.File(self.dataset.results_partitions[int(fid)], "r") as h5:
+                with self.dataset._pool.with_partition(int(fid)) as h5:
                     file_frames.append(
                         self._read_multi_results_all_steps(
                             h5=h5,
@@ -415,3 +376,10 @@ class Nodes:
             analysis_time=self.dataset.info.analysis_time,
             size=self.dataset.info.size,
         )
+
+
+# Back-compat alias — see class docstring. The legacy name ``Nodes`` is
+# guaranteed importable from ``STKO_to_python.nodes.nodes`` and from the
+# ``STKO_to_python.nodes`` package. Do not remove without a migration
+# deprecation cycle.
+Nodes = NodeManager

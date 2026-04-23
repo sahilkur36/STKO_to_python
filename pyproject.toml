@@ -4,31 +4,71 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "STKO_to_python"
-version = "0.1.0"
+version = "1.0.0"
 description = "STKO tools for Python"
 readme = "README.md"
 authors = [
     {name = "Nicolas Mora Bowen", email = "nmorabowen@gmail.com"}
 ]
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE"]
 classifiers = [
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Operating System :: OS Independent",
 ]
-requires-python = ">=3.8"
+requires-python = ">=3.11"
 dependencies = [
+    # numpy: numerical arrays used everywhere
     "numpy",
+    # h5py: .mpco HDF5 reader
     "h5py",
+    # matplotlib: plotting backend for Plot / NodalResultsPlotter
     "matplotlib",
-    "jupyter",
+    # tables: PyTables backend used by some pandas HDF paths
     "tables",
+    # pandas: result DataFrames are the primary return type
     "pandas",
+    # scipy: aggregation helpers (interpolation, signal processing)
     "scipy",
+]
+
+[project.optional-dependencies]
+# Installed with: pip install -e ".[notebook]"
+# Jupyter stack for running the example notebooks. Not required for
+# library use — the core API is notebook-free. Moved out of required
+# deps so `pip install stko-to-python` doesn't pull ~50 transitive
+# packages that library consumers don't need.
+notebook = [
+    "jupyter",
+]
+# Installed with: pip install -e ".[test]"
+test = [
+    "pytest>=7.4",
+]
+# Installed with: pip install -e ".[bench]"
+# Enables pytest-benchmark suites under tests/bench/. Opt-in so regular
+# test runs don't pay the bench collection overhead. Introduced in
+# Phase 5.1.a.
+bench = [
+    "pytest-benchmark>=4.0",
+]
+# Installed with: pip install -e ".[docs]"
+# Builds the documentation site via MkDocs + Material theme +
+# mkdocstrings (autodoc from docstrings). Introduced in Phase 5.2.c.
+docs = [
+    "mkdocs>=1.6",
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.25",
 ]
 
 [project.urls]
 "Homepage" = "https://github.com/nmorabowen/STKO_to_python"
+"Documentation" = "https://nmorabowen.github.io/STKO_to_python/"
 "Bug Tracker" = "https://github.com/nmorabowen/STKO_to_python/issues"
+"Releases" = "https://github.com/nmorabowen/STKO_to_python/releases"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -36,3 +76,23 @@ packages = {find = {where = ["src"]}}
 
 [tool.setuptools.package-data]
 "*" = ["*.ipynb"]
+
+[tool.pytest.ini_options]
+minversion = "7.4"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+]
+markers = [
+    "fixture: tests that require the golden .mpco fixture (skipped if absent)",
+    "slow: tests that take more than ~1s",
+    "bench: benchmark case (requires pytest-benchmark; lives under bench/)",
+]
+filterwarnings = [
+    "error::DeprecationWarning:STKO_to_python.*",
+]

@@ -16,6 +16,7 @@ from typing import (
 )
 
 import fnmatch
+import logging
 import re
 
 import numpy as np
@@ -26,8 +27,37 @@ from matplotlib.colors import Normalize
 
 from .MPCOdf import MPCO_df
 
+logger = logging.getLogger(__name__)
+
 Key = Tuple[str, str, str]  # (model, station, rupture)
 GroupKey: TypeAlias = tuple[str, ...]
+
+
+class _LazyPickle:
+    """Proxy that defers loading a pickle file until first attribute access."""
+
+    def __init__(self, path: Path) -> None:
+        object.__setattr__(self, "_path", path)
+        object.__setattr__(self, "_obj", None)
+
+    def _load(self):
+        obj = object.__getattribute__(self, "_obj")
+        if obj is None:
+            from ..results.nodal_results_dataclass import NodalResults
+            path = object.__getattribute__(self, "_path")
+            obj = NodalResults.load_pickle(path)
+            object.__setattr__(self, "_obj", obj)
+        return obj
+
+    def __getattr__(self, name: str):
+        return getattr(self._load(), name)
+
+    def __repr__(self) -> str:
+        obj = object.__getattribute__(self, "_obj")
+        if obj is None:
+            path = object.__getattribute__(self, "_path")
+            return f"<_LazyPickle(not loaded) {path.name}>"
+        return repr(obj)
 
 class MPCOResults:
     """
@@ -49,7 +79,9 @@ class MPCOResults:
       - nr.info.<metric> (analysis_time, size, ...)
     """
 
-    _FNAME_PATTERN = re.compile(r"^(?P<model>.+?)__(?P<station>.+?)__(?P<rupture>.+?)\.pkl(\.gz)?$")
+    _FNAME_PATTERN = re.compile(
+        r"^(?P<model>[^_]+(?:_[^_]+)*)__(?P<station>[^_]+(?:_[^_]+)*)__(?P<rupture>[^_]+(?:_[^_]+)*)\.pkl(\.gz)?$"
+    )
     _DIMS_ALL = ("number", "letter", "sta", "rup")
     _PSTAT_RE = re.compile(r"^p(\d{1,2})$")
 
@@ -64,8 +96,24 @@ class MPCOResults:
         self.style: Optional[dict] = style
         self.name: Optional[str] = name
         self._station_index_cache: Optional[dict[str, int]] = None
-        
+
+        # Single MPCO_df instance shared by both accessors below. Phase 4.5
+        # introduced ``.df`` as the canonical accessor; ``.create_df`` is
+        # retained for backward compatibility with existing call sites.
         self.create_df = MPCO_df(self)
+
+    @property
+    def df(self) -> "MPCO_df":
+        """Canonical accessor for the MPCO-specific DataFrame extractors
+        (``drift_df``, ``pga_df``, ``torsion_df``, ``base_rocking_df``,
+        ``wide_to_long``, and their ``_long`` / ``_mod`` variants).
+
+        Same instance as ``self.create_df`` — ``.df`` is the preferred
+        spelling introduced in Phase 4.5 to match spec §8:
+        "Collapse MPCO_df into MPCOResults as a .df accessor." The older
+        ``.create_df`` attribute continues to work for back-compat.
+        """
+        return self.create_df
 
     # ------------------------------------------------------------------
     # IO
@@ -77,12 +125,12 @@ class MPCOResults:
         out_dir: Path,
         style: Optional[dict] = None,
         name: Optional[str] = None,
+        lazy: bool = True,
     ) -> "MPCOResults":
         out_dir = Path(out_dir)
         out: Dict[Key, Any] = {}
 
-        # local import to avoid circular deps
-        from ..results.nodal_results_dataclass import NodalResults  # adjust to your package path
+        from ..results.nodal_results_dataclass import NodalResults
 
         for p in out_dir.glob("*.pkl*"):
             m = cls._FNAME_PATTERN.match(p.name)
@@ -91,7 +139,10 @@ class MPCOResults:
             key: Key = (m.group("model"), m.group("station"), m.group("rupture"))
             if key in out:
                 raise ValueError(f"Duplicate key {key} from file {p.name!r}")
-            out[key] = NodalResults.load_pickle(p)
+            if lazy:
+                out[key] = _LazyPickle(p)
+            else:
+                out[key] = NodalResults.load_pickle(p)
 
         return cls(out, style=style, name=name)
 
@@ -277,8 +328,8 @@ class MPCOResults:
     def _tag_from_key(self, k: Key) -> dict[str, str]:
         m, sta, rup = k
         mm = str(m).strip()
-        mnum = re.search(r"([1-4])", mm)
-        mlet = re.search(r"([A-Da-d])\s*$", mm)
+        mnum = re.search(r"(\d+)", mm)
+        mlet = re.search(r"([A-Za-z])\s*$", mm)
         return {
             "number": mnum.group(1) if mnum else "",
             "letter": mlet.group(1).upper() if mlet else "",
@@ -670,7 +721,10 @@ class MPCOResults:
 
             t2, y2, t_trim, y_trim = self._align_xy(t, y)
             if warn_mismatch and (t_trim or y_trim):
-                print(f"[plot_drift] mismatch {k}: time={len(t)} y={len(y)} → {len(t2)}")
+                logger.info(
+                    "[plot_drift] mismatch %s: time=%d y=%d -> %d",
+                    k, len(t), len(y), len(t2),
+                )
 
             if t2.size == 0:
                 return None
@@ -1402,11 +1456,11 @@ class MPCOResults:
                 return str(r)
             if group_by_color == "letter":
                 mm = str(m)
-                m2 = re.search(r"([A-Da-d])\s*$", mm)
+                m2 = re.search(r"([A-Za-z])\s*$", mm)
                 return m2.group(1).upper() if m2 else ""
             if group_by_color == "number":
                 mm = str(m)
-                m2 = re.search(r"([1-4])", mm)
+                m2 = re.search(r"(\d+)", mm)
                 return m2.group(1) if m2 else ""
             raise RuntimeError("unreachable")
 
@@ -1572,11 +1626,11 @@ class MPCOResults:
                 return str(r)
             if group_by_color == "letter":
                 mm = str(m)
-                m2 = re.search(r"([A-Da-d])\s*$", mm)
+                m2 = re.search(r"([A-Za-z])\s*$", mm)
                 return m2.group(1).upper() if m2 else ""
             if group_by_color == "number":
                 mm = str(m)
-                m2 = re.search(r"([1-4])", mm)
+                m2 = re.search(r"(\d+)", mm)
                 return m2.group(1) if m2 else ""
             raise RuntimeError("unreachable")
 
@@ -1656,6 +1710,185 @@ class MPCOResults:
             ylim=ylim,
             sym_x=False,
             sym_y=(component != "theta_mag_rad"),  # |θ| is nonnegative; others symmetric-ish
+            vline0=False,
+            legend=False,
+            grid=True,
+        )
+
+        def _legend(fig: plt.Figure, ax: plt.Axes) -> None:
+            self._legend_below(
+                fig,
+                ax,
+                fontsize=legend_fontsize,
+                ncol=legend_ncol,
+                frameon=legend_frameon,
+            )
+
+        if overlay:
+            fig, ax = out
+            _legend(fig, ax)
+            plt.tight_layout()
+            return fig, ax
+
+        figs = out
+        for fig, ax in figs:
+            _legend(fig, ax)
+            plt.tight_layout()
+        return figs
+
+    def plot_roof_torsion(
+        self,
+        *,
+        z_coord: float,
+        node_a_xy: tuple[float, float],
+        node_b_xy: tuple[float, float],
+        model: str | Iterable[str] | None = None,
+        station: str | Iterable[str] | None = None,
+        rupture: str | Iterable[str] | None = None,
+        plot_residual: str | None = None,   # None | 'rigidity'
+        overlay: bool = True,
+        figsize: tuple[float, float] = (10, 5),
+        title: str | None = None,
+        xlim: tuple[float, float] | None = None,
+        ylim: tuple[float, float] | None = None,
+        group_by_color: str | None = None,  # None | "sta" | "rup" | "letter" | "number"
+        linewidth: float = 1.0,
+        legend_fontsize: float = 7,
+        legend_ncol: int | None = None,
+        legend_frameon: bool = False,
+    ):
+        """
+        Plot roof torsion (rotation about z) time history.
+
+        Parameters
+        ----------
+        z_coord : float
+            Z-coordinate of the roof level (model units).
+        node_a_xy, node_b_xy : (float, float)
+            XY coordinates of the two reference nodes at the roof level.
+            Full 3-D coords are built as (*node_a_xy, z_coord).
+        plot_residual : None | 'rigidity'
+            None   -> plot theta_rad time series (default).
+            'rigidity' -> plot the rigidity_ratio quality indicator instead
+                          (requires return_quality=True on NodalResults.roof_torsion).
+        """
+        valid_residuals = {None, "rigidity"}
+        if plot_residual not in valid_residuals:
+            raise ValueError(f"plot_residual must be one of {valid_residuals}")
+
+        valid_groups = {None, "sta", "rup", "letter", "number"}
+        if group_by_color not in valid_groups:
+            raise ValueError(f"group_by_color must be one of {valid_groups}")
+
+        node_a_coord = (*node_a_xy, float(z_coord))
+        node_b_coord = (*node_b_xy, float(z_coord))
+        return_quality = plot_residual == "rigidity"
+
+        pairs = self.select(model=model, station=station, rupture=rupture)
+        if not pairs:
+            raise ValueError("No matching results for the given selection.")
+        pairs = sorted(pairs, key=lambda kv: kv[0])
+
+        palette = list(plt.rcParams["axes.prop_cycle"].by_key().get("color", ["C0", "C1", "C2", "C3"]))
+
+        def _group_value(k: Key) -> str:
+            m, s, r = k
+            if group_by_color is None:
+                return ""
+            if group_by_color == "sta":
+                return str(s)
+            if group_by_color == "rup":
+                return str(r)
+            if group_by_color == "letter":
+                mm = str(m)
+                m2 = re.search(r"([A-Za-z])\s*$", mm)
+                return m2.group(1).upper() if m2 else ""
+            if group_by_color == "number":
+                mm = str(m)
+                m2 = re.search(r"(\d+)", mm)
+                return m2.group(1) if m2 else ""
+            raise RuntimeError("unreachable")
+
+        color_map: dict[Any, str] = {}
+        if group_by_color is None:
+            for i, (k, _) in enumerate(pairs):
+                color_map[k] = palette[i % len(palette)]
+        else:
+            groups_seen: list[str] = []
+            for k, _ in pairs:
+                g = _group_value(k)
+                if g not in groups_seen:
+                    groups_seen.append(g)
+            for i, g in enumerate(sorted(groups_seen)):
+                color_map[g] = palette[i % len(palette)]
+
+        def plot_one(ax: plt.Axes, k: Key, nr: Any) -> tuple[float, float, float, float] | None:
+            result = nr.roof_torsion(
+                node_a_coord=node_a_coord,
+                node_b_coord=node_b_coord,
+                result_name="DISPLACEMENT",
+                ux_component=1,
+                uy_component=2,
+                return_quality=return_quality,
+            )
+
+            if return_quality:
+                # result is (theta_series, debug_df)
+                theta_series, debug_df = result
+                if plot_residual == "rigidity":
+                    y_series = debug_df["rigidity_ratio"]
+                else:
+                    y_series = theta_series
+            else:
+                y_series = result
+
+            y = np.asarray(y_series.to_numpy(), dtype=float)
+
+            t = getattr(nr, "time", None)
+            if t is not None and len(t) == len(y):
+                x = np.asarray(t, dtype=float)
+            else:
+                x = np.asarray(y_series.index, dtype=float)
+
+            x2, y2, *_ = self._align_xy(x, y)
+            if x2.size == 0:
+                return None
+
+            label = self._label_for(k, nr)
+            kw = self._style_for_key(k)
+            kw["linewidth"] = linewidth
+
+            if group_by_color is None:
+                kw["color"] = color_map[k]
+            else:
+                kw["color"] = color_map[_group_value(k)]
+
+            ax.plot(x2, y2, label=label, **kw)
+
+            xmin, xmax = float(np.nanmin(x2)), float(np.nanmax(x2))
+            ymin, ymax = float(np.nanmin(y2)), float(np.nanmax(y2))
+            return (xmin, xmax, ymin, ymax)
+
+        if plot_residual == "rigidity":
+            ylabel = "Rigidity ratio (–)"
+            default_title = "Roof torsion — rigidity ratio"
+        else:
+            ylabel = "Roof rotation θz (rad)"
+            default_title = "Roof torsion θz"
+
+        out = self._plot_overlay_or_facets(
+            pairs=pairs,
+            plot_one=plot_one,
+            overlay=overlay,
+            figsize_overlay=figsize,
+            figsize_single=figsize,
+            title=title or default_title,
+            xlabel="Time (s)",
+            ylabel=ylabel,
+            xlim=xlim,
+            ylim=ylim,
+            sym_x=False,
+            sym_y=(plot_residual is None),
             vline0=False,
             legend=False,
             grid=True,
@@ -1906,6 +2139,76 @@ class MPCOResults:
         return figs
 
     # ------------------------------------------------------------------
+    # Compute table
+    # ------------------------------------------------------------------
+    def compute_table(
+        self,
+        *,
+        metrics: Mapping[str, Callable[[Key, Any], Any]] | Sequence[str],
+        model: str | Iterable[str] | None = None,
+        station: str | Iterable[str] | None = None,
+        rupture: str | Iterable[str] | None = None,
+        order: Callable[[Key, Any], Any] | None = None,
+        include_label: bool = True,
+        drop_na_rows: bool = False,
+    ) -> pd.DataFrame:
+        pairs = self.select(model=model, station=station, rupture=rupture, order=order)
+        if not pairs:
+            raise ValueError("No matching results for the given selection.")
+
+        fns: dict[str, Callable[[Key, Any], Any]] = {}
+
+        if isinstance(metrics, Mapping):
+            for name, fn in metrics.items():
+                if not callable(fn):
+                    raise TypeError(f"metrics[{name!r}] is not callable.")
+                fns[str(name)] = fn
+        else:
+            for name in metrics:
+                nm = str(name)
+
+                def _make_info_getter(attr: str) -> Callable[[Key, Any], Any]:
+                    return lambda _k, nr: getattr(nr.info, attr, None)
+
+                fns[nm] = _make_info_getter(nm)
+
+        rows: list[dict[str, Any]] = []
+
+        for k, nr in pairs:
+            m, s, r = k
+            row: dict[str, Any] = {"model": m, "station": s, "rupture": r}
+            if include_label:
+                row["label"] = self._label_for(k, nr)
+
+            for name, fn in fns.items():
+                val = fn(k, nr)
+
+                if isinstance(val, (int, float, np.integer, np.floating)) or val is None:
+                    row[name] = None if val is None else float(val)
+
+                elif isinstance(val, dict):
+                    for kk, vv in val.items():
+                        col = f"{name}.{kk}"
+                        row[col] = None if vv is None else float(vv)
+
+                else:
+                    try:
+                        row[name] = float(val)  # type: ignore[arg-type]
+                    except Exception:
+                        row[name] = val
+
+            rows.append(row)
+
+        df = pd.DataFrame(rows)
+
+        if drop_na_rows:
+            metric_cols = [c for c in df.columns if c not in ("model", "station", "rupture", "label")]
+            if metric_cols:
+                df = df.dropna(subset=metric_cols, how="all")
+
+        return df
+
+    # ------------------------------------------------------------------
     # Metric matrix and plots
     # ------------------------------------------------------------------
     def metric_matrix(
@@ -1937,11 +2240,14 @@ class MPCOResults:
         T["Tier"] = tiers
         T["Case"] = cases
 
+        cases_sorted = sorted(T["Case"].unique())
+        tiers_sorted = sorted(T["Tier"].unique())
+
         mat = (
             T.groupby(["Case", "Tier"])[metric]
             .agg(agg)
             .unstack("Tier")
-            .reindex(index=list("ABCD"), columns=[1, 2, 3, 4])
+            .reindex(index=cases_sorted, columns=tiers_sorted)
         )
         return mat
 
@@ -1999,26 +2305,29 @@ class MPCOResults:
         T["Tier"] = tiers
         T["Case"] = cases
 
+        cases_sorted = sorted(T["Case"].unique())
+        tiers_sorted = sorted(T["Tier"].unique())
+
         gb = T.groupby(["Case", "Tier"])[metric]
 
         if agg == "mean":
-            mat_mean = gb.mean().unstack("Tier").reindex(index=list("ABCD"), columns=[1, 2, 3, 4])
-            mat_std = gb.std(ddof=1).unstack("Tier").reindex(index=list("ABCD"), columns=[1, 2, 3, 4])
+            mat_mean = gb.mean().unstack("Tier").reindex(index=cases_sorted, columns=tiers_sorted)
+            mat_std = gb.std(ddof=1).unstack("Tier").reindex(index=cases_sorted, columns=tiers_sorted)
             Z = mat_mean.to_numpy(dtype=float)
         elif agg == "median":
-            mat_mean = gb.median().unstack("Tier").reindex(index=list("ABCD"), columns=[1, 2, 3, 4])
+            mat_mean = gb.median().unstack("Tier").reindex(index=cases_sorted, columns=tiers_sorted)
             mat_std = None
             Z = mat_mean.to_numpy(dtype=float)
         elif agg == "max":
-            mat_mean = gb.max().unstack("Tier").reindex(index=list("ABCD"), columns=[1, 2, 3, 4])
+            mat_mean = gb.max().unstack("Tier").reindex(index=cases_sorted, columns=tiers_sorted)
             mat_std = None
             Z = mat_mean.to_numpy(dtype=float)
         elif agg == "min":
-            mat_mean = gb.min().unstack("Tier").reindex(index=list("ABCD"), columns=[1, 2, 3, 4])
+            mat_mean = gb.min().unstack("Tier").reindex(index=cases_sorted, columns=tiers_sorted)
             mat_std = None
             Z = mat_mean.to_numpy(dtype=float)
         elif agg == "sum":
-            mat_mean = gb.sum().unstack("Tier").reindex(index=list("ABCD"), columns=[1, 2, 3, 4])
+            mat_mean = gb.sum().unstack("Tier").reindex(index=cases_sorted, columns=tiers_sorted)
             mat_std = None
             Z = mat_mean.to_numpy(dtype=float)
         else:
@@ -2486,13 +2795,16 @@ class MPCOResults:
         T["Tier"] = tiers
         T["Case"] = cases
 
+        cases_sorted = sorted(T["Case"].unique())
+        tiers_sorted = sorted(T["Tier"].unique())
+
         gb = T.groupby(["Case", "Tier"])[metric_name]
 
         if show_std:
-            mat_mean = gb.mean().unstack("Tier").reindex(index=list("ABCD"), columns=[1, 2, 3, 4])
-            mat_std = gb.std(ddof=1).unstack("Tier").reindex(index=list("ABCD"), columns=[1, 2, 3, 4])
+            mat_mean = gb.mean().unstack("Tier").reindex(index=cases_sorted, columns=tiers_sorted)
+            mat_std = gb.std(ddof=1).unstack("Tier").reindex(index=cases_sorted, columns=tiers_sorted)
         else:
-            mat_mean = gb.mean().unstack("Tier").reindex(index=list("ABCD"), columns=[1, 2, 3, 4])
+            mat_mean = gb.mean().unstack("Tier").reindex(index=cases_sorted, columns=tiers_sorted)
             mat_std = None
 
         Z = mat_mean.to_numpy(dtype=float)
@@ -2653,6 +2965,447 @@ class MPCOResults:
         ax.grid(axis="x", linestyle="--", alpha=0.35, zorder=1)
         plt.tight_layout()
         return fig, ax
+
+    # ------------------------------------------------------------------
+    # Dataframe extraction
+    # ------------------------------------------------------------------
+
+    def collect_interstory_drift_envelope_pd(
+        self,
+        *,
+        component: object,
+        selection_set_name: str | None = "CenterPoints",
+        selection_set_id: int | Sequence[int] | None = None,
+        node_ids: Sequence[int] | None = None,
+        coordinates: Sequence[Sequence[float]] | None = None,
+        result_name: str = "DISPLACEMENT",
+        stage: str | None = None,
+        dz_tol: float = 1e-3,
+        representative: str = "max_abs",
+        # selection of runs
+        model: str | Iterable[str] | None = None,
+        station: str | Iterable[str] | None = None,
+        rupture: str | Iterable[str] | None = None,
+        order: Callable[[Key, Any], Any] | None = None,
+        # grouping tags (added as columns)
+        group_by: tuple[str, ...] | None = ("number", "letter"),
+    ) -> pd.DataFrame:
+        """
+        Collect per-run interstory drift envelope tables into one tidy DataFrame.
+
+        This method ONLY orchestrates:
+        - selects runs
+        - calls nr.interstory_drift_envelope_pd(...)
+        - appends metadata columns (model/station/rupture + tags + group key)
+
+        Returns
+        -------
+        Tidy DataFrame with columns like:
+        model, station, rupture, run_label,
+        number, letter, sta, rup,
+        group,
+        z_lower, z_upper, dz,
+        max_drift, min_drift, max_abs_drift, representative_drift,
+        lower_node, upper_node
+        """
+        # validate representative
+        if representative not in ("max_abs", "max", "min"):
+            raise ValueError("representative must be 'max_abs', 'max', or 'min'.")
+
+        # group spec normalize (we only want group_by normalization here)
+        group_by, _cb, _st, _cbg = self._normalize_grouping_spec(group_by=group_by, color_by=None, stat=None)
+
+        # select runs
+        pairs = self.select(model=model, station=station, rupture=rupture, order=order)
+        if not pairs:
+            raise ValueError("No matching results for the given selection.")
+        pairs = sorted(pairs, key=lambda kv: kv[0])
+
+        # IMPORTANT: NodalResults requires exactly one of the node selectors
+        provided = sum(x is not None for x in (selection_set_id, selection_set_name, node_ids, coordinates))
+        if provided != 1:
+            raise ValueError(
+                "Provide exactly ONE of: selection_set_id, selection_set_name, node_ids, coordinates."
+            )
+
+        frames: list[pd.DataFrame] = []
+
+        for k, nr in pairs:
+            env = nr.interstory_drift_envelope_pd(
+                component=component,
+                selection_set_name=selection_set_name,
+                selection_set_id=selection_set_id,
+                node_ids=node_ids,
+                coordinates=coordinates,
+                result_name=result_name,
+                stage=stage,
+                dz_tol=dz_tol,
+                representative=representative,
+            ).copy()
+
+            # metadata
+            m, s, r = k
+            tags = self._tag_from_key(k)
+            gk = self._group_key(k, group_by)
+            group = "|".join(gk) if group_by is not None else "ALL"
+
+            env["model"] = m
+            env["station"] = s
+            env["rupture"] = r
+            env["run_label"] = self._label_for(k, nr)
+
+            for kk, vv in tags.items():
+                env[kk] = vv
+
+            env["group"] = group
+
+            # handy derived columns
+            env["story_z_mid"] = 0.5 * (env["z_lower"].astype(float) + env["z_upper"].astype(float))
+
+            frames.append(env)
+
+        if not frames:
+            raise ValueError("No drift envelope tables were produced.")
+
+        out = pd.concat(frames, ignore_index=True)
+        # nice ordering
+        cols_first = ["group", "model", "station", "rupture", "run_label", "number", "letter", "sta", "rup"]
+        cols_first = [c for c in cols_first if c in out.columns]
+        cols_rest = [c for c in out.columns if c not in cols_first]
+        out = out[cols_first + cols_rest]
+        return out
+
+    def collect_roof_drift_df(
+        self,
+        *,
+        top: tuple[float, float, float],
+        bottom: tuple[float, float, float],
+        components: tuple[int, int] = (1, 2),          # (X, Y)
+        result_name: str = "DISPLACEMENT",
+        relative_drift: bool = True,                  # True -> drift ratio ( /dz ) via nr.drift
+        reduce_time: str = "abs_max",                 # "abs_max" | "max" | "min" | "rms"
+        stage: str | None = None,                     # optional (if your nr.drift supports it)
+        # run selection
+        model: str | Iterable[str] | None = None,
+        station: str | Iterable[str] | None = None,
+        rupture: str | Iterable[str] | None = None,
+        order: Callable[[Key, Any], Any] | None = None,
+        # output options
+        add_log: bool = True,
+        eps_log: float = 1e-16,
+        include_label: bool = False,
+    ) -> pd.DataFrame:
+        """
+        Build a tidy DataFrame for statistical modeling of roof drift.
+
+        One row per (run, direction):
+            model, station, rupture, Tier, Case, direction, roof_drift
+
+        Notes
+        -----
+        - If relative_drift=True: uses nr.drift(...) (expected to return drift ratio if your NodalResults does that).
+        - If relative_drift=False: uses nr.fetch(...) and computes Δu_top - Δu_bottom (no /dz).
+        - reduce_time controls how the time series is collapsed to a scalar.
+        """
+
+        if reduce_time not in ("abs_max", "max", "min", "rms"):
+            raise ValueError("reduce_time must be one of: 'abs_max', 'max', 'min', 'rms'.")
+
+        cx, cy = int(components[0]), int(components[1])
+
+        # -------------------------
+        # Helpers
+        # -------------------------
+        def _reduce(y: np.ndarray) -> float:
+            y = np.asarray(y, dtype=float)
+            y = y[np.isfinite(y)]
+            if y.size == 0:
+                return float("nan")
+            if reduce_time == "abs_max":
+                return float(np.nanmax(np.abs(y)))
+            if reduce_time == "max":
+                return float(np.nanmax(y))
+            if reduce_time == "min":
+                return float(np.nanmin(y))
+            if reduce_time == "rms":
+                return float(np.sqrt(np.nanmean(y * y)))
+            raise RuntimeError("unreachable")
+
+        def _delta_u_series(nr: Any, *, comp: int) -> pd.Series:
+            top_id = int(nr.info.nearest_node_id([top], return_distance=False)[0])
+            bot_id = int(nr.info.nearest_node_id([bottom], return_distance=False)[0])
+
+            s = nr.fetch(result_name=result_name, component=comp, node_ids=[top_id, bot_id])
+
+            # multi-stage handling (match your plotting logic)
+            if isinstance(s.index, pd.MultiIndex) and s.index.nlevels == 3:
+                stages = tuple(sorted({str(x) for x in s.index.get_level_values(0)}))
+                if not stages:
+                    return pd.Series(dtype=float)
+                # if user provided stage and it's present, use it; else last stage
+                if stage is not None and stage in stages:
+                    s = s.xs(stage, level=0)
+                else:
+                    s = s.xs(stages[-1], level=0)
+
+            if not (isinstance(s.index, pd.MultiIndex) and s.index.nlevels == 2):
+                return pd.Series(dtype=float)
+
+            u_top = s.xs(top_id, level=0).sort_index()
+            u_bot = s.xs(bot_id, level=0).sort_index()
+            u_top, u_bot = u_top.align(u_bot, join="inner")
+            du = u_top - u_bot
+            du.name = f"delta_u({result_name}:{comp})"
+            return du
+
+        def _roof_scalar(nr: Any, *, comp: int) -> float:
+            if relative_drift:
+                # try to pass stage/result_name if your nr.drift supports it; otherwise fallback
+                try:
+                    s = nr.drift(
+                        top=top,
+                        bottom=bottom,
+                        component=comp,
+                        result_name=result_name,
+                        stage=stage,
+                        reduce="series",
+                    )
+                except TypeError:
+                    # older signature
+                    try:
+                        s = nr.drift(
+                            top=top,
+                            bottom=bottom,
+                            component=comp,
+                            result_name=result_name,
+                            reduce="series",
+                        )
+                    except TypeError:
+                        s = nr.drift(top=top, bottom=bottom, component=comp, reduce="series")
+                y = np.asarray(getattr(s, "to_numpy", lambda **_: np.asarray(s)) (dtype=float), dtype=float)
+                return _reduce(y)
+
+            # relative_drift=False: scalar from Δu series
+            du = _delta_u_series(nr, comp=comp)
+            if du.empty:
+                return float("nan")
+            return _reduce(du.to_numpy(dtype=float))
+
+        # -------------------------
+        # Build table via compute_table
+        # -------------------------
+        metrics = {
+            "roof_drift_X": (lambda _k, nr: _roof_scalar(nr, comp=cx)),
+            "roof_drift_Y": (lambda _k, nr: _roof_scalar(nr, comp=cy)),
+        }
+
+        T = self.compute_table(
+            metrics=metrics,
+            model=model,
+            station=station,
+            rupture=rupture,
+            order=order,
+            include_label=include_label,
+            drop_na_rows=False,
+        )
+
+        if T.empty:
+            return T
+
+        # Tier/Case
+        tiers, cases = [], []
+        for m in T["model"].astype(str).tolist():
+            t, c = self.parse_tier_letter(m)
+            tiers.append(t)
+            cases.append(c)
+
+        T = T.copy()
+        T["Tier"] = np.asarray(tiers, dtype=int)
+        T["Case"] = pd.Series(cases, dtype="category")
+        T["TierCase"] = T["Tier"].astype(str) + T["Case"].astype(str)
+
+        # Long format: direction factor
+        id_vars = ["model", "station", "rupture", "Tier", "Case", "TierCase"]
+        if include_label and "label" in T.columns:
+            id_vars.append("label")
+
+        L = T.melt(
+            id_vars=id_vars,
+            value_vars=["roof_drift_X", "roof_drift_Y"],
+            var_name="direction",
+            value_name="roof_drift",
+        )
+
+        L["direction"] = L["direction"].map({"roof_drift_X": "X", "roof_drift_Y": "Y"}).astype("category")
+        L["station"] = L["station"].astype("category")
+        L["rupture"] = L["rupture"].astype("category")
+
+        # Handy run id (ignores direction)
+        L["run_key"] = (
+            L["model"].astype(str) + "|" + L["station"].astype(str) + "|" + L["rupture"].astype(str)
+        )
+
+        # Optional log response (common for drift-like metrics)
+        if add_log:
+            y = L["roof_drift"].to_numpy(dtype=float)
+            L["log_roof_drift"] = np.log(np.maximum(np.abs(y), float(eps_log)))
+
+        # Nice column order
+        first = ["run_key", "model", "Tier", "Case", "TierCase", "station", "rupture", "direction", "roof_drift"]
+        if add_log:
+            first.append("log_roof_drift")
+        if include_label and "label" in L.columns:
+            first.insert(1, "label")
+
+        cols = first + [c for c in L.columns if c not in first]
+        return L[cols]
+
+    def drift_df(
+        self,
+        *,
+        top: tuple[float, float, float],
+        bottom: tuple[float, float, float],
+        components: Sequence[int] = (1, 2),
+        result_name: str = "DISPLACEMENT",
+        relative_drift: bool = True,          # True -> drift (/dz), False -> Δu
+        reduce_time: str = "abs_max",         # "abs_max" | "max" | "min" | "rms"
+        stage: str | None = None,
+
+        # selection
+        model: str | Iterable[str] | None = None,
+        station: str | Iterable[str] | None = None,
+        rupture: str | Iterable[str] | None = None,
+        order: Callable[[tuple[str, str, str], Any], Any] | None = None,
+    ) -> pd.DataFrame:
+        """
+        Minimal wide DataFrame:
+
+            Tier | Case | sta | rup | {result_name}_c{comp} ...
+
+        One row per (model, station, rupture).
+        """
+
+        if reduce_time not in ("abs_max", "max", "min", "rms"):
+            raise ValueError("reduce_time must be one of: 'abs_max', 'max', 'min', 'rms'.")
+
+        comps = tuple(int(c) for c in components)
+        if not comps:
+            raise ValueError("components must be non-empty.")
+
+        # -------------------------------------------------
+        # helpers
+        # -------------------------------------------------
+        def _reduce(y: np.ndarray) -> float:
+            y = np.asarray(y, dtype=float)
+            y = y[np.isfinite(y)]
+            if y.size == 0:
+                return float("nan")
+            if reduce_time == "abs_max":
+                return float(np.nanmax(np.abs(y)))
+            if reduce_time == "max":
+                return float(np.nanmax(y))
+            if reduce_time == "min":
+                return float(np.nanmin(y))
+            if reduce_time == "rms":
+                return float(np.sqrt(np.nanmean(y * y)))
+            raise RuntimeError("unreachable")
+
+        def _select_stage(s: pd.Series | pd.DataFrame) -> pd.Series | pd.DataFrame:
+            if isinstance(s.index, pd.MultiIndex) and s.index.nlevels == 3:
+                stages = tuple(sorted({str(x) for x in s.index.get_level_values(0)}))
+                if not stages:
+                    return s.iloc[0:0]
+                if stage is not None and stage in stages:
+                    return s.xs(stage, level=0)
+                return s.xs(stages[-1], level=0)
+            return s
+
+        def _delta_u_series(nr: Any, *, comp: int, top_id: int, bot_id: int) -> pd.Series:
+            s = nr.fetch(result_name=result_name, component=comp, node_ids=[top_id, bot_id])
+            s = _select_stage(s)
+
+            if not (isinstance(s.index, pd.MultiIndex) and s.index.nlevels == 2):
+                return pd.Series(dtype=float)
+
+            u_top = s.xs(top_id, level=0).sort_index()
+            u_bot = s.xs(bot_id, level=0).sort_index()
+            u_top, u_bot = u_top.align(u_bot, join="inner")
+            return u_top - u_bot
+
+        def _pair_scalar(nr: Any, *, comp: int, top_id: int, bot_id: int) -> float:
+            if relative_drift:
+                try:
+                    s = nr.drift(
+                        top=top,
+                        bottom=bottom,
+                        component=comp,
+                        result_name=result_name,
+                        stage=stage,
+                        reduce="series",
+                    )
+                except TypeError:
+                    try:
+                        s = nr.drift(
+                            top=top,
+                            bottom=bottom,
+                            component=comp,
+                            result_name=result_name,
+                            reduce="series",
+                        )
+                    except TypeError:
+                        s = nr.drift(top=top, bottom=bottom, component=comp, reduce="series")
+
+                y = np.asarray(
+                    getattr(s, "to_numpy", lambda **_: np.asarray(s))(dtype=float),
+                    dtype=float,
+                )
+                return _reduce(y)
+
+            du = _delta_u_series(nr, comp=comp, top_id=top_id, bot_id=bot_id)
+            if du.empty:
+                return float("nan")
+            return _reduce(du.to_numpy(dtype=float))
+
+        # -------------------------------------------------
+        # collect
+        # -------------------------------------------------
+        pairs = self.select(model=model, station=station, rupture=rupture, order=order)
+
+        cols = ["Tier", "Case", "sta", "rup"] + [f"{result_name}_c{c}" for c in comps]
+        if not pairs:
+            return pd.DataFrame(columns=cols)
+
+        rows: list[dict[str, Any]] = []
+
+        for k, nr in pairs:
+            m, sta, rup = k
+            tier, case = self.parse_tier_letter(m)
+
+            row: dict[str, Any] = {
+                "Tier": int(tier),
+                "Case": str(case),
+                "sta": str(sta),
+                "rup": str(rup),
+            }
+
+            top_id = int(nr.info.nearest_node_id([top], return_distance=False)[0])
+            bot_id = int(nr.info.nearest_node_id([bottom], return_distance=False)[0])
+
+            for comp in comps:
+                row[f"{result_name}_c{comp}"] = _pair_scalar(
+                    nr, comp=comp, top_id=top_id, bot_id=bot_id
+                )
+
+            rows.append(row)
+
+        df = pd.DataFrame(rows)
+
+        df["Tier"] = df["Tier"].astype(int)
+        df["Case"] = df["Case"].astype("category")
+        df["sta"] = df["sta"].astype("category")
+        df["rup"] = df["rup"].astype("category")
+
+        return df[cols]
 
     def plot_interstory_drift_histograms(
         self,

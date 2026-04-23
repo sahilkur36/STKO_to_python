@@ -4,7 +4,7 @@ import re
 from typing import TYPE_CHECKING
 from collections import defaultdict
 from typing import Optional, Dict, List, Sequence, Any
-import h5py
+import numpy as np
 import pandas as pd
 import logging
 
@@ -13,14 +13,24 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from ..core.dataset import MPCODataSet
 
-class ModelInfo:
+class ModelInfoReader:
     """
+    Canonical Layer 3 reader for MPCO model metadata.
+
+    Loads once on construction (via the ``MPCODataSet`` friend
+    relationship), then exposes read-only views. The legacy name
+    ``ModelInfo`` is preserved as an alias at the bottom of this module.
+    New code should prefer ``ModelInfoReader``.
+
     This class has a "friend" relationship with MPCODataSet, which is allowed
     to access protected methods.
     """
     def __init__(self, dataset:'MPCODataSet'):
         self.dataset = dataset
-        
+        # Lightweight collaborator — stateless, no construction cost.
+        from ..io.time_series_reader import TimeSeriesReader
+        self._time_series_reader = TimeSeriesReader()
+
     def _get_file_list(self, extension: Optional[str] = None, verbose: bool = False) -> Dict[str, Dict[int, str]]:
         """
         Retrieves a mapping of partitioned files from the dataset directory.
@@ -74,7 +84,7 @@ class ModelInfo:
                         part = int(part_str.split(".")[0])
                         file_mapping[name][part] = file
                     except (ValueError, IndexError):
-                        print(f"Skipping file due to unexpected naming format: {file}")
+                        logger.warning("Skipping file due to unexpected naming format: %s", file)
                 else:
                     # Handle compound extensions like ".mpco.cdata"
                     if filename.endswith(f".{extension}"):
@@ -85,16 +95,16 @@ class ModelInfo:
                         file_mapping[base][0] = file
 
             if verbose:
-                print("\nFound files:")
+                logger.info("Found files:")
                 for name, parts in file_mapping.items():
-                    print(f"\n{name}:")
+                    logger.info("%s:", name)
                     for part, path in sorted(parts.items()):
-                        print(f"  Part: {part}, File: {path}")
+                        logger.info("  Part: %s, File: %s", part, path)
 
             return file_mapping
 
         except Exception as e:
-            print(f"Model Info Error during file listing: {e}")
+            logger.error("Model Info Error during file listing: %s", e)
             raise
         
     def _get_file_list_for_results_name(self, extension= None, verbose=False):
@@ -122,13 +132,16 @@ class ModelInfo:
             list: Sorted list of model stage names from all partitions.
         """
         model_stages = []
+        policy = self.dataset._format_policy
 
         # Use partition paths from the dictionary created by _get_results_partitions
-        for _, partition_path in self.dataset.results_partitions.items():
-            
-            with h5py.File(partition_path, 'r') as results:
+        for part_idx in self.dataset.results_partitions:
+            with self.dataset._pool.with_partition(part_idx) as results:
                 # Get model stages from the current partition file
-                partition_stages = [key for key in results.keys() if key.startswith("MODEL_STAGE")]
+                partition_stages = [
+                    key for key in results.keys()
+                    if policy.is_model_stage_group(key)
+                ]
                 model_stages.extend(partition_stages)
 
         # Remove duplicates by converting to a set, then back to a sorted list
@@ -138,9 +151,9 @@ class ModelInfo:
             raise ValueError("Model Info Error: No model stages found in the result partitions.")
 
         if verbose:
-            print(f'The model stages found across partitions are: {model_stages}')
+            logger.info('The model stages found across partitions are: %s', model_stages)
 
-        return model_stages    
+        return model_stages
     
     def _get_node_results_names(
             self,
@@ -164,19 +177,18 @@ class ModelInfo:
         model_stages = [model_stage] if model_stage else self.dataset.model_stages
 
         node_results_names: set[str] = set()
+        policy = self.dataset._format_policy
 
         # 2. Scan every partition for every requested stage
         for stage in model_stages:
-            for _, partition_path in self.dataset.results_partitions.items():
-                with h5py.File(partition_path, "r") as results:
-                    nodes_group = results.get(
-                        self.dataset.RESULTS_ON_NODES_PATH.format(model_stage=stage)
-                    )
+            for part_idx in self.dataset.results_partitions:
+                with self.dataset._pool.with_partition(part_idx) as results:
+                    nodes_group = results.get(policy.results_on_nodes_path(stage))
                     if nodes_group:
                         node_results_names.update(nodes_group.keys())
 
             if verbose:
-                print(f"Node results in '{stage}': {sorted(node_results_names)}")
+                logger.info("Node results in '%s': %s", stage, sorted(node_results_names))
 
         # 3. Handle empty results according to caller’s wishes
         if not node_results_names:
@@ -212,19 +224,18 @@ class ModelInfo:
         model_stages = [model_stage] if model_stage else self.dataset.model_stages
 
         element_results_names: set[str] = set()
+        policy = self.dataset._format_policy
 
         # 2. Scan every partition for every requested stage
         for stage in model_stages:
-            for _, partition_path in self.dataset.results_partitions.items():
-                with h5py.File(partition_path, "r") as results:
-                    ele_group = results.get(
-                        self.dataset.RESULTS_ON_ELEMENTS_PATH.format(model_stage=stage)
-                    )
+            for part_idx in self.dataset.results_partitions:
+                with self.dataset._pool.with_partition(part_idx) as results:
+                    ele_group = results.get(policy.results_on_elements_path(stage))
                     if ele_group:
                         element_results_names.update(ele_group.keys())
 
             if verbose:
-                print(f"Element results in '{stage}': {sorted(element_results_names)}")
+                logger.info("Element results in '%s': %s", stage, sorted(element_results_names))
 
         # 3. Handle empty results according to caller’s wishes
         if not element_results_names:
@@ -292,17 +303,16 @@ class ModelInfo:
             if not result_names:
                 skipped_stages.append(stage)
                 if verbose:
-                    print(f"[info] Skipping stage '{stage}': no element results found.")
+                    logger.info("Skipping stage '%s': no element results found.", stage)
                 continue
 
             scanned_stages.append(stage)
+            policy = self.dataset._format_policy
 
             # Walk all partitions, gather element type groups per result name
-            for _, partition_path in self.dataset.results_partitions.items():
-                with h5py.File(partition_path, "r") as results:
-                    base_group = results.get(
-                        self.dataset.RESULTS_ON_ELEMENTS_PATH.format(model_stage=stage)
-                    )
+            for part_idx in self.dataset.results_partitions:
+                with self.dataset._pool.with_partition(part_idx) as results:
+                    base_group = results.get(policy.results_on_elements_path(stage))
                     if base_group is None:
                         # This partition has no elements group for this stage
                         continue
@@ -322,7 +332,10 @@ class ModelInfo:
 
             if verbose:
                 counts = {k: len(v) for k, v in element_types_dict.items()}
-                print(f"[info] Stage '{stage}': collected types (counts per result) -> {counts}")
+                logger.info(
+                    "Stage '%s': collected types (counts per result) -> %s",
+                    stage, counts,
+                )
 
         # Finalize / convert sets -> sorted lists
         element_types_dict_sorted: dict[str, list[str]] = {
@@ -347,7 +360,7 @@ class ModelInfo:
             logger.warning(f"Model Info: {msg}")
 
         if verbose:
-            print(f"[info] Unique element types ({len(unique_all)}): {unique_all}")
+            logger.info("Unique element types (%d): %s", len(unique_all), unique_all)
 
         return {
             "element_types_dict": element_types_dict_sorted,
@@ -395,15 +408,14 @@ class ModelInfo:
             if not result_names:
                 skipped_stages.append(stage)
                 if verbose:
-                    print(f"[info] Skipping stage '{stage}': no element results found.")
+                    logger.info("Skipping stage '%s': no element results found.", stage)
                 continue  # nothing to do for this stage
 
             # 3) Walk all partitions and harvest element type groups per result name
-            for _, partition_path in self.dataset.results_partitions.items():
-                with h5py.File(partition_path, "r") as results:
-                    base_group = results.get(
-                        self.dataset.RESULTS_ON_ELEMENTS_PATH.format(model_stage=stage)
-                    )
+            policy = self.dataset._format_policy
+            for part_idx in self.dataset.results_partitions:
+                with self.dataset._pool.with_partition(part_idx) as results:
+                    base_group = results.get(policy.results_on_elements_path(stage))
                     if base_group is None:
                         # This partition has no elements group for this stage; skip
                         continue
@@ -418,7 +430,7 @@ class ModelInfo:
 
             if verbose:
                 found = sorted(element_types)
-                print(f"[info] Stage '{stage}': collected {len(found)} type(s) so far.")
+                logger.info("Stage '%s': collected %d type(s) so far.", stage, len(found))
 
         # 4) Finalize
         if not element_types:
@@ -449,34 +461,27 @@ class ModelInfo:
             pd.DataFrame: A DataFrame with columns ['STEP', 'TIME'], sorted by STEP.
         """
 
-        time_series_dict = {}  # Dictionary to store STEP -> TIME mapping
+        time_series_dict: dict[int, float] = {}
 
-        for part_number, partition_path in self.dataset.results_partitions.items():
+        for part_number in self.dataset.results_partitions:
             try:
-                with h5py.File(partition_path, 'r') as partition:
+                with self.dataset._pool.with_partition(part_number) as partition:
                     base_path = f"{model_stage}/RESULTS/ON_NODES/{results_name}/DATA"
-                    data_group = partition.get(base_path)
-
-                    if data_group is None:
-                        continue  # Skip if data does not exist
-
-                    # Iterate over all steps and collect STEP & TIME attributes
-                    for step_name in data_group.keys():
-                        step_group = data_group[step_name]
-                        step_value = step_group.attrs.get("STEP")
-                        time_value = step_group.attrs.get("TIME")
-
-                        if step_value is not None and time_value is not None:
-                            time_series_dict[int(step_value)] = float(time_value)  # Store STEP -> TIME mapping
+                    time_series_dict.update(
+                        self._time_series_reader.read_step_time_pairs(partition.get(base_path))
+                    )
 
             except Exception as e:
-                print(f"Model Info Error: Get time series error processing partition {part_number} for model stage '{model_stage}', results name '{results_name}': {e}")
+                logger.error(
+                    "Model Info Error: Get time series error processing partition %s "
+                    "for model stage '%s', results name '%s': %s",
+                    part_number, model_stage, results_name, e,
+                )
 
-        # Convert to DataFrame
-        df = pd.DataFrame(list(time_series_dict.items()), columns=['STEP', 'TIME']).sort_values(by='STEP')
+        return pd.DataFrame(
+            list(time_series_dict.items()), columns=['STEP', 'TIME']
+        ).sort_values(by='STEP')
 
-        return df
-    
     def _get_time_series_on_elements_for_stage(self, model_stage, results_name, element_type):
         """
         Retrieve and consolidate the unique time series data across all partitions 
@@ -492,28 +497,22 @@ class ModelInfo:
             pd.DataFrame: A DataFrame with columns ['STEP', 'TIME'], sorted by STEP.
         """
 
-        time_series_dict = {}  # Dictionary to store STEP -> TIME mapping
+        time_series_dict: dict[int, float] = {}
 
-        for part_number, partition_path in self.dataset.results_partitions.items():
+        for part_number in self.dataset.results_partitions:
             try:
-                with h5py.File(partition_path, 'r') as partition:
+                with self.dataset._pool.with_partition(part_number) as partition:
                     base_path = f"{model_stage}/RESULTS/ON_ELEMENTS/{results_name}/{element_type}/DATA"
-                    data_group = partition.get(base_path)
-
-                    if data_group is None:
-                        continue  # Skip if DATA does not exist
-
-                    # Iterate over all steps and collect STEP & TIME attributes
-                    for step_name in data_group.keys():
-                        step_group = data_group[step_name]
-                        step_value = step_group.attrs.get("STEP")
-                        time_value = step_group.attrs.get("TIME")
-
-                        if step_value is not None and time_value is not None:
-                            time_series_dict[int(step_value)] = float(time_value)  # Store STEP -> TIME mapping
+                    time_series_dict.update(
+                        self._time_series_reader.read_step_time_pairs(partition.get(base_path))
+                    )
 
             except Exception as e:
-                print(f"Model Info Error: Get time series error processing partition {part_number} for model stage '{model_stage}', results name '{results_name}', element type '{element_type}': {e}")
+                logger.error(
+                    "Model Info Error: Get time series error processing partition %s "
+                    "for model stage '%s', results name '%s', element type '%s': %s",
+                    part_number, model_stage, results_name, element_type, e,
+                )
 
         # Convert to DataFrame
         df = pd.DataFrame(list(time_series_dict.items()), columns=['STEP', 'TIME']).sort_values(by='STEP')
@@ -576,8 +575,11 @@ class ModelInfo:
             all_time_series.append(time_df)
 
         # ── union ───────────────────────────────────────────────────────────────
+        # ``copy=`` is deprecated in pandas 3.x (copy-on-write is now the
+        # default); passing it emits Pandas4Warning which bubbles up as a
+        # DeprecationWarning under our strict-warning filter.
         final_df = (
-            pd.concat(all_time_series, copy=False)
+            pd.concat(all_time_series)
             .set_index(["MODEL_STAGE", "STEP"])
             .sort_index()
         )
@@ -599,7 +601,7 @@ class ModelInfo:
         elem_types_dict: Dict[str, List[str]] = self.dataset.element_types.get(
             "element_types_dict", {}
         )
-        partitions = list(self.dataset.results_partitions.values())
+        partition_indices = list(self.dataset.results_partitions)
 
         steps_info: Dict[str, int] = {}
 
@@ -608,8 +610,8 @@ class ModelInfo:
 
             # 1) nodal results ------------------------------------------------
             for n_res in node_names:
-                for part_path in partitions:
-                    with h5py.File(part_path, "r") as f:
+                for part_idx in partition_indices:
+                    with self.dataset._pool.with_partition(part_idx) as f:
                         grp = f.get(f"{stage}/RESULTS/ON_NODES/{n_res}/DATA")
                         if grp is not None:
                             step_ids.update(self._to_step_int(k) for k in grp.keys())
@@ -620,8 +622,8 @@ class ModelInfo:
             if not step_ids:
                 for e_res in elem_names:
                     for e_type in elem_types_dict.get(e_res, []):
-                        for part_path in partitions:
-                            with h5py.File(part_path, "r") as f:
+                        for part_idx in partition_indices:
+                            with self.dataset._pool.with_partition(part_idx) as f:
                                 grp = f.get(
                                     f"{stage}/RESULTS/ON_ELEMENTS/{e_res}/{e_type}/DATA"
                                 )
@@ -731,17 +733,11 @@ class ModelInfo:
             return int(match.group(1))
 
         raise ValueError(f"Un-recognisable STEP key: {step_key!r}")
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
+
+
+# Back-compat alias — see class docstring.
+ModelInfo = ModelInfoReader
+
     
     
     

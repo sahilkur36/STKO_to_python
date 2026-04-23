@@ -1,4 +1,6 @@
 from __future__ import annotations
+import logging
+from pathlib import Path
 from typing import Dict, Optional, Tuple, Any
 
 from ..nodes.nodes import Nodes
@@ -7,8 +9,14 @@ from ..model.model_info import ModelInfo
 from ..model.cdata import CData
 from ..plotting.plot import Plot
 from ..io.info import Info
+from ..io.partition_pool import Hdf5PartitionPool
+from ..io.format_policy import MpcoFormatPolicy
+from ..selection import SelectionSetResolver
+from ..query import ElementResultsQueryEngine, NodalResultsQueryEngine
 from .dataclasses import MetaData
 from ..plotting.plot_dataclasses import ModelPlotSettings
+
+logger = logging.getLogger(__name__)
 
 
 class MPCODataSet:
@@ -22,8 +30,35 @@ class MPCODataSet:
 
     The class implements a "friend" pattern with its component classes, allowing it
     to access their protected methods which are indicated by a leading underscore.
-    These protected methods are used internally within the dataset implementation
-    but are not intended to be part of the public API.
+
+    Friend-method convention
+    ------------------------
+    Methods prefixed with a single underscore on the composite classes
+    (``Nodes``, ``Elements``, ``ModelInfo``, ``CData``) are of two kinds:
+
+    1. **Manager-facing "friend" methods.** These are called by
+       ``MPCODataSet`` (and only by ``MPCODataSet``) to assemble dataset
+       attributes during ``_create_object_attributes``. Examples:
+       ``ModelInfo._get_file_list_for_results_name``,
+       ``ModelInfo._get_model_stages``, ``Nodes._get_all_nodes_ids``,
+       ``Elements._get_all_element_index``, ``CData._extract_selection_set_ids``.
+       These are intentionally not public, but the dataset is allowed to
+       reach in. Renaming them requires updating the dataset too.
+
+    2. **Truly internal helpers.** Everything else starting with ``_`` is
+       private to its owning class and must not be called from outside.
+
+    The upcoming refactor (see ``docs/architecture-refactor-proposal.md``)
+    replaces this convention with explicit, named collaborator objects
+    passed through constructors. Until then, treat category (1) as a
+    stable internal contract between ``MPCODataSet`` and its managers.
+
+    Context-manager support
+    -----------------------
+    ``MPCODataSet`` supports the ``with`` statement. ``__enter__`` returns
+    the dataset; ``__exit__`` is a no-op today but will close pooled HDF5
+    handles once the partition pool lands in Phase 1 of the refactor.
+    Existing code that does not use ``with`` keeps working unchanged.
 
     Upon initialization, this class automatically loads directory information,
     extracts partitions, model stages, results names, and other essential dataset
@@ -115,14 +150,30 @@ class MPCODataSet:
         file_extension='*.mpco',
         verbose=False,
         plot_settings: Optional[ModelPlotSettings] = None,
+        pool_size: Optional[int] = None,
     ):
-        
+
         self.hdf5_directory = hdf5_directory
         self.recorder_name = recorder_name
         self.name=name
         self.file_extension = file_extension
         self.verbose = verbose
-        
+        # pool_size=None → performance-first default of min(16, n_partitions),
+        # applied in _create_object_attributes once the partition count is
+        # known. Users who need the legacy open-per-call behavior (e.g.
+        # another process is writing to the file and they want coherent
+        # reads on every query) pass pool_size=0 explicitly.
+        self._pool_size: Optional[int] = pool_size
+
+        if verbose:
+            logger.setLevel(logging.INFO)
+
+        # Phase 1 Layer 1 collaborators. The pool is constructed with the
+        # partition map after `_create_object_attributes` discovers the
+        # files; the format policy is stateless and can be built up front.
+        self._format_policy = MpcoFormatPolicy()
+        self._pool: Optional[Hdf5PartitionPool] = None
+
         # Initialize the metadata
         self.metadata = MetaData()
         
@@ -149,6 +200,21 @@ class MPCODataSet:
         # Extract the results partition for the given recorder name
         self.results_partitions=self.model_info._get_file_list_for_results_name(extension='mpco', verbose=False)
         self.cdata_partitions=self.model_info._get_file_list_for_results_name(extension='cdata', verbose=False)
+
+        # Build the partition pool now that we know the partition map.
+        # Default to min(16, n_partitions) for the performance-first
+        # baseline (refactor proposal §6). Every consumer (model_info,
+        # nodes, elements) now routes through the pool, so a pooled
+        # default is safe; pool_size=0 remains available for callers
+        # that want the legacy open-per-call semantics.
+        if self._pool_size is None:
+            effective_pool_size = min(16, len(self.results_partitions))
+        else:
+            effective_pool_size = int(self._pool_size)
+        self._pool = Hdf5PartitionPool(
+            self.results_partitions,
+            pool_size=effective_pool_size,
+        )
         
         # Extract the model stages information
         self.model_stages= self.model_info._get_model_stages()
@@ -175,100 +241,118 @@ class MPCODataSet:
         
         # Get the selection set mapping (This is the only place cdata is used)
         self.selection_set=self.cdata._extract_selection_set_ids()
-        
+
+        # Phase 2: centralized resolver (side-by-side with legacy per-manager
+        # helpers; consumers will switch over in a later phase).
+        self._selection_resolver = SelectionSetResolver(self.selection_set)
+
+        # Phase 2.8: query engines (side-by-side; managers remain the public
+        # entry point, the engines add caching and will own the read logic
+        # in a later phase).
+        self._nodal_query_engine = NodalResultsQueryEngine(
+            dataset=self,
+            pool=self._pool,
+            policy=self._format_policy,
+            resolver=self._selection_resolver,
+        )
+        self._element_query_engine = ElementResultsQueryEngine(
+            dataset=self,
+            pool=self._pool,
+            policy=self._format_policy,
+            resolver=self._selection_resolver,
+        )
+
         if self.verbose:
             self.print_summary()
         
     def print_summary(self):
         """
-        Print a summary of the virtual dataset.
-        ---------------------------------------
+        Emit a summary of the virtual dataset at INFO level on the
+        module logger. Enable ``verbose=True`` on construction or
+        call ``logging.basicConfig(level=logging.INFO)`` to see output.
         """
-        print(f'File name: {self.recorder_name}')
-        print(f'Number of partitions: {len(self.results_partitions)}')
-        
-        print('------------------------------------------------------')
-        
-        print(f"Number of model stages: {len(self.model_stages)}")
-        print(f'Model stages: {self.model_stages}')
+        logger.info('File name: %s', self.recorder_name)
+        logger.info('Number of partitions: %d', len(self.results_partitions))
+
+        logger.info('------------------------------------------------------')
+
+        logger.info("Number of model stages: %d", len(self.model_stages))
+        logger.info('Model stages: %s', self.model_stages)
         for stage in self.model_stages:
-            print(f"  - {stage}")
-            
-        print('------------------------------------------------------')
-        print(f'Number of nodal results: {len(self.node_results_names)}')
+            logger.info("  - %s", stage)
+
+        logger.info('------------------------------------------------------')
+        logger.info('Number of nodal results: %d', len(self.node_results_names))
         for name in self.node_results_names:
-            print(f"  - {name}")
-            
-        print('------------------------------------------------------')
-        print(f'Number of element results: {len(self.element_results_names)}')
+            logger.info("  - %s", name)
+
+        logger.info('------------------------------------------------------')
+        logger.info('Number of element results: %d', len(self.element_results_names))
         for name in self.element_results_names:
-            print(f"  - {name}")
-        print(f'Number of unique element types: {len(self.unique_element_types)}')
+            logger.info("  - %s", name)
+        logger.info('Number of unique element types: %d', len(self.unique_element_types))
         for name in self.unique_element_types:
-            print(f"  - {name}")
-        
-        print('------------------------------------------------------')
-        print('General model information:')
-        
-        print(f"Number of nodes: {len(self.nodes_info)}")
-        print(f"Number of element types: {len(self.unique_element_types)}")
-        print(f"Number of elements: {len(self.elements_info)}")
-        print(f"Number of steps: {self.number_of_steps}")
-        print(f"Number of selection sets: {len(self.selection_set)}")
+            logger.info("  - %s", name)
+
+        logger.info('------------------------------------------------------')
+        logger.info('General model information:')
+
+        logger.info("Number of nodes: %d", len(self.nodes_info))
+        logger.info("Number of element types: %d", len(self.unique_element_types))
+        logger.info("Number of elements: %d", len(self.elements_info))
+        logger.info("Number of steps: %s", self.number_of_steps)
+        logger.info("Number of selection sets: %d", len(self.selection_set))
 
     def print_selection_set_info(self):
-        """Method to print the selection set information.
-        """
-        
+        """Emit selection-set information at INFO level on the module logger."""
+
         for key in self.selection_set.keys():
-            print(f"Selection set: {key}")
-            print(f"Selection Set name: {self.selection_set[key]['SET_NAME']}")
-            print('------------------------------------------------------')
-    
+            logger.info("Selection set: %s", key)
+            logger.info("Selection Set name: %s", self.selection_set[key]['SET_NAME'])
+            logger.info('------------------------------------------------------')
+
     def print_model_stages(self):
-        """Method to print the model stages information.
-        """
-        
-        print(f"Number of model stages: {len(self.model_stages)}")
+        """Emit model-stages information at INFO level on the module logger."""
+
+        logger.info("Number of model stages: %d", len(self.model_stages))
         for stage in self.model_stages:
-            print(f"  - {stage}")
-            
+            logger.info("  - %s", stage)
+
     def print_nodal_results(self):
-        """Method to print the nodal results information.
-        """
-        
-        print(f"Number of nodal results: {len(self.node_results_names)}")
+        """Emit nodal-results information at INFO level on the module logger."""
+
+        logger.info("Number of nodal results: %d", len(self.node_results_names))
         for name in self.node_results_names:
-            print(f"  - {name}")
-            
+            logger.info("  - %s", name)
+
     def print_element_results(self):
-        """Method to print the element results information.
-        """
-        
-        print(f"Number of element results: {len(self.element_results_names)}")
+        """Emit element-results information at INFO level on the module logger."""
+
+        logger.info("Number of element results: %d", len(self.element_results_names))
         for name in self.element_results_names:
-            print(f"  - {name}")
-            
+            logger.info("  - %s", name)
+
     def print_element_types(self):
-        """Method to print the element types information.
-        """
-        
-        print(f"Number of unique element types: {len(self.element_types['unique_element_types'])}")
+        """Emit element-types information at INFO level on the module logger."""
+
+        logger.info(
+            "Number of unique element types: %d",
+            len(self.element_types['unique_element_types']),
+        )
         for result, types in self.element_types['element_types_dict'].items():
-            print(f"  - {result}")
+            logger.info("  - %s", result)
             for type in types:
-                print(f"    - {type}")
-                        
+                logger.info("    - %s", type)
+
     def print_unique_element_types(self):
-        """Method to print the unique element types information.
-        """
-        
-        print(f"Number of unique element types: {len(self.unique_element_types)}")
+        """Emit unique element-types information at INFO level on the module logger."""
+
+        logger.info("Number of unique element types: %d", len(self.unique_element_types))
         for name in self.unique_element_types:
-            print(f"  - {name}")
-    
+            logger.info("  - %s", name)
+
     def _print_welcome_message(self):
-        
+
         text=f"""
             ============================================================================
             Hola Ladruños!
@@ -277,7 +361,7 @@ class MPCODataSet:
             ============================================================================
             """
 
-        print(text)
+        logger.info(text)
     
     def __str__(self) -> str:
         return f"{self.name or Path(self.hdf5_directory).name} ({self.recorder_name})"
@@ -288,5 +372,45 @@ class MPCODataSet:
                 f"name={self.name!r}, "
                 f"file_extension={self.file_extension!r}, "
                 f"verbose={self.verbose})")
+
+    def __enter__(self) -> "MPCODataSet":
+        """Enter the runtime context; returns ``self``.
+
+        Phase 0 stub: no resources are held yet. When the partition pool
+        lands in Phase 1, ``__exit__`` will close pooled HDF5 handles.
+        """
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Exit the runtime context.
+
+        Closes every handle held by the partition pool. Safe to call
+        even when ``pool_size=0`` (the legacy default) — the pool holds
+        no handles in that configuration, so ``close_all()`` is a no-op.
+        Returning ``None`` (implicitly) means exceptions raised inside
+        the ``with`` block propagate unchanged.
+        """
+        pool = getattr(self, "_pool", None)
+        if pool is not None:
+            pool.close_all()
+        # Drop query-engine caches too: they may hold DataFrames keyed on
+        # HDF5 reads that are now stale / unreachable.
+        for engine_attr in ("_nodal_query_engine", "_element_query_engine"):
+            engine = getattr(self, engine_attr, None)
+            if engine is not None:
+                engine.clear_caches()
+        return None
+
+    def clear_result_caches(self) -> None:
+        """Drop all cached fetches from the nodal and element query engines.
+
+        Useful after explicit edits to the underlying ``.mpco`` file or
+        when the caller wants to reclaim memory between queries without
+        tearing down the whole dataset.
+        """
+        for engine_attr in ("_nodal_query_engine", "_element_query_engine"):
+            engine = getattr(self, engine_attr, None)
+            if engine is not None:
+                engine.clear_caches()
         
         
