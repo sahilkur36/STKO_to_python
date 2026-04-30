@@ -37,16 +37,19 @@ PUBLIC_SYMBOLS = [
     # Deep imports that existing notebooks use.
     ("STKO_to_python.core.dataset", "MPCODataSet"),
     ("STKO_to_python.io.hdf5_utils", "HDF5Utils"),
-    ("STKO_to_python.nodes.nodes", "Nodes"),
-    ("STKO_to_python.elements.elements", "Elements"),
     ("STKO_to_python.elements.element_results", "ElementResults"),
-    ("STKO_to_python.model.model_info", "ModelInfo"),
-    ("STKO_to_python.model.cdata", "CData"),
     ("STKO_to_python.plotting.plot", "Plot"),
-    ("STKO_to_python.plotting.plot_dataclasses", "ModelPlotSettings"),
     ("STKO_to_python.utilities.attribute_dictionary_class", "AttrDict"),
     ("STKO_to_python.results.nodal_results_dataclass", "NodalResults"),
     ("STKO_to_python.results.nodal_results_plotting", "NodalResultsPlotter"),
+    # Canonical post-Group-B paths (no warning).
+    ("STKO_to_python.nodes.node_manager", "NodeManager"),
+    ("STKO_to_python.elements.element_manager", "ElementManager"),
+    ("STKO_to_python.model.model_info_reader", "ModelInfoReader"),
+    ("STKO_to_python.model.cdata_reader", "CDataReader"),
+    # NOTE: deprecated deep paths (e.g. STKO_to_python.plotting.plot_dataclasses,
+    # STKO_to_python.nodes.nodes) are exercised below with explicit
+    # DeprecationWarning expectations.
 ]
 
 
@@ -73,6 +76,97 @@ def test_package_all_contract() -> None:
     declared = set(pkg.__all__)
     missing = required - declared
     assert not missing, f"Public __all__ is missing symbols: {missing}"
+
+
+DEPRECATED_DEEP_IMPORTS = [
+    # (module_path, attr, canonical_module, canonical_attr)
+    (
+        "STKO_to_python.core.dataclasses",
+        "MetaData",
+        "STKO_to_python.core.metadata",
+        "ModelMetadata",
+    ),
+    (
+        "STKO_to_python.plotting.plot_dataclasses",
+        "ModelPlotSettings",
+        "STKO_to_python.plotting.plot_settings",
+        "PlotSettings",
+    ),
+    # Format-package relocation: gauss_points / shape_functions moved
+    # from utilities/ to format/. Old paths re-export with warnings.
+    (
+        "STKO_to_python.utilities.gauss_points",
+        "get_ip_layout",
+        "STKO_to_python.format.gauss_points",
+        "get_ip_layout",
+    ),
+    (
+        "STKO_to_python.utilities.gauss_points",
+        "ELEMENT_IP_CATALOG",
+        "STKO_to_python.format.gauss_points",
+        "ELEMENT_IP_CATALOG",
+    ),
+    (
+        "STKO_to_python.utilities.shape_functions",
+        "compute_physical_coords",
+        "STKO_to_python.format.shape_functions",
+        "compute_physical_coords",
+    ),
+    (
+        "STKO_to_python.utilities.shape_functions",
+        "SHAPE_FUNCTIONS",
+        "STKO_to_python.format.shape_functions",
+        "SHAPE_FUNCTIONS",
+    ),
+    # Group-B file renames: legacy module paths now warn on the legacy
+    # class name. The canonical class also lives there (re-exported by
+    # the shim) and resolves quietly — that case is tested in
+    # test_manager_aliases.py.
+    (
+        "STKO_to_python.nodes.nodes",
+        "Nodes",
+        "STKO_to_python.nodes.node_manager",
+        "NodeManager",
+    ),
+    (
+        "STKO_to_python.elements.elements",
+        "Elements",
+        "STKO_to_python.elements.element_manager",
+        "ElementManager",
+    ),
+    (
+        "STKO_to_python.model.model_info",
+        "ModelInfo",
+        "STKO_to_python.model.model_info_reader",
+        "ModelInfoReader",
+    ),
+    (
+        "STKO_to_python.model.cdata",
+        "CData",
+        "STKO_to_python.model.cdata_reader",
+        "CDataReader",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("module_path", "attr", "canonical_module", "canonical_attr"),
+    DEPRECATED_DEEP_IMPORTS,
+)
+def test_deprecated_deep_path_still_resolves(
+    module_path: str,
+    attr: str,
+    canonical_module: str,
+    canonical_attr: str,
+) -> None:
+    """Deprecated deep paths must keep resolving (hard-compat) but emit
+    a ``DeprecationWarning`` and resolve to the same object as the
+    canonical path."""
+    module = importlib.import_module(module_path)
+    with pytest.warns(DeprecationWarning, match=attr):
+        legacy = getattr(module, attr)
+    canonical = getattr(importlib.import_module(canonical_module), canonical_attr)
+    assert legacy is canonical
 
 
 def test_pickle_module_qualname_pins() -> None:
