@@ -124,6 +124,215 @@ s = nr.fetch_nearest(
 )
 ```
 
+## Selecting nodes lazily — `ds.nodes.select()`
+
+`fetch(...)` filters an *already-read* result by node ids; for picking
+*which nodes to read* in the first place, use the chainable selector
+returned by `ds.nodes.select()`. It is the node-side analogue of
+`ds.elements.select()` and the full pipeline is documented in
+[Cookbook 06: node selector + mask pipeline](cookbook/06-node-selector-and-mask-pipeline.md).
+
+A selector is **lazy** — every call returns a new selector; nothing
+hits HDF5 until you call `.ids()`, `.df()`, `.mask()`, `.count()`, or
+pass it to `get_nodal_results(selector=…)`.
+
+### Anchors
+
+```python
+# By selection set (name or id, case-insensitive)
+ds.nodes.select().from_selection("Roof")
+ds.nodes.select().from_selection(2)
+ds.nodes.select().from_selection(["Roof", "Mezzanine"])
+
+# By explicit ids
+ds.nodes.select().with_ids([10, 42, 99])
+```
+
+Anchors define the universe for negation (`~`); without an anchor the
+universe is "every node in the model" — fine for spatial filtering and
+unions, but `~sel` raises `ValueError` so you must anchor before
+negating.
+
+### Spatial primitives
+
+```python
+ds.nodes.select().within_box(min=(0, 0, 0), max=(10, 10, 30))
+ds.nodes.select().within_distance((5, 5, 15), radius=2.0)
+ds.nodes.select().nearest_to((5, 5, 15), k=8)             # rows sorted by distance
+ds.nodes.select().on_plane(z=3000.0, tol=1e-3)            # axis-aligned
+ds.nodes.select().on_plane(point=(0,0,0), normal=(1,1,0)) # general plane
+ds.nodes.select().near_line((0,0,0), (0,0,3000), radius=50.0)
+ds.nodes.select().coord_in("z", lo=2.0, hi=4.0)           # one bound is OK
+ds.nodes.select().at_level("z", value=3000.0, tol=1e-3)   # story floor sugar
+```
+
+### Bridge to elements: `attached_to(...)`
+
+Closes the loop between node and element selectors — every node that
+participates in a chosen element set:
+
+```python
+shells = (
+    ds.elements.select()
+    .of_type("ASDShellQ4")
+    .centroid_in("z", lo=0.0, hi=3.0)
+)
+diaphragm_nodes = ds.nodes.select().attached_to(element_selector=shells)
+
+# Or with explicit ids
+ds.nodes.select().attached_to(element_ids=[101, 102, 103])
+```
+
+### Custom predicate
+
+```python
+# Anything not covered by a primitive
+ds.nodes.select().where(
+    lambda df: (df["x"]**2 + df["y"]**2) < 25.0
+)
+```
+
+The callable receives the node-index DataFrame (`node_id, file_id,
+index, x, y, z`) and must return a bool array of equal length.
+
+### Boolean composition
+
+```python
+a = ds.nodes.select().from_selection("Roof")
+b = ds.nodes.select().at_level("x", 0.0)
+(a & b).ids()    # intersection
+(a | b).ids()    # union
+(~a).ids()       # complement of a within a's anchored universe
+```
+
+### Plug into `get_nodal_results`
+
+```python
+roof = (
+    ds.nodes.select()
+    .at_level("z", 3000.0, tol=1e-3)
+    .coord_in("x", lo=1000.0, hi=4000.0)
+)
+
+nr = ds.nodes.get_nodal_results(
+    results_name="DISPLACEMENT",
+    selector=roof,
+    model_stage="MODEL_STAGE[2]",
+)
+```
+
+The selector's resolved ids are unioned with anything else you pass
+(`node_ids`, `selection_set_id`, `selection_set_name`).
+
+## Filtering by result value — `nr.where(...)`
+
+After the data is read, build a per-node boolean mask from a value
+condition over a time window. The mask composes with `&` / `|` / `~`
+and applies via `nr[mask]` to get a fresh, trimmed `NodalResults`.
+
+### Single-component pick
+
+```python
+mask = (
+    nr.where(time=(0.0, 10.0))                  # default time window
+      .component("DISPLACEMENT", 1)             # (result_name, component)
+      .abs_peak()                               # |max| over the window
+      .gt(0.05)                                 # comparator → mask
+)
+hot = nr[mask]                                   # trimmed NodalResults
+ids = mask.ids()                                 # int64 array
+```
+
+### Vector-magnitude pick
+
+For the most common "filter nodes by `|U|` peak" case, `magnitude(...)`
+reduces to a per-`(node, step)` scalar via `sqrt(sum(comp_i**2))`
+*before* the time-axis reduction. With `components=()` (default) all
+components for the result are used:
+
+```python
+# All components — typical for 3-DOF DISPLACEMENT / VELOCITY / ACCELERATION
+nr.where().magnitude("DISPLACEMENT").peak().gt(0.05)
+
+# Planar magnitude (X-Y only)
+nr.where().magnitude("DISPLACEMENT", components=(1, 2)).abs_peak().gt(0.05)
+```
+
+### Reductions and comparators
+
+| Reduction | Meaning |
+|---|---|
+| `at_step(s)` | scalar at one step (int step index) |
+| `at_time(t)` | scalar at the step nearest to time `t` |
+| `peak(time=…)` | signed max over the window |
+| `trough(time=…)` | signed min over the window |
+| `abs_peak(time=…)` | max of `|·|` over the window |
+| `mean(time=…)` | arithmetic mean over the window |
+| `residual(time=…)` | last step in the window |
+| `over_threshold(v, time=…)` | fraction of steps where value > `v` |
+
+| Comparator | Mask predicate |
+|---|---|
+| `.gt(v)` | `> v` |
+| `.lt(v)` | `< v` |
+| `.ge(v)` | `>= v` |
+| `.le(v)` | `<= v` |
+| `.between(lo, hi, inclusive=True)` | `lo <= x <= hi` |
+| `.outside(lo, hi, inclusive=False)` | `x < lo` or `x > hi` |
+| `.eq(v, atol=0.0)` | `x == v` (or `near` if `atol > 0`) |
+| `.near(v, atol=…)` | `|x - v| <= atol` |
+
+The chain default `time=` argument is overridden by any explicit
+`time=` on a reduction. The grammar:
+
+```python
+nr.where(time=None)               # all steps (the default)
+nr.where(time=42)                 # int step index
+nr.where(time=2.5)                # nearest step to time 2.5
+nr.where(time=slice(0.0, 10.0))   # half-open time range
+nr.where(time=(0.0, 10.0))        # tuple form, same meaning
+nr.where(time=[0, 5, 10])         # explicit step indices
+nr.where(time=[0.0, 1.0, 5.0])    # nearest step per time
+```
+
+### Tuning thresholds from the data
+
+Every reduction is also exposed as a `pd.Series` so you can pick a
+threshold informed by the distribution rather than guessing:
+
+```python
+peaks = nr.where().magnitude("DISPLACEMENT").peak().values()
+print(peaks.describe())                    # min/max/mean/std per node
+threshold = float(peaks.quantile(0.75))    # top 25 %
+
+mask = nr.where().magnitude("DISPLACEMENT").peak().gt(threshold)
+hot = nr[mask]
+```
+
+### Predicate escape hatch
+
+The full `(node_id, step)` index is exposed if you need an arbitrary
+shape of comparison. The callable is reduced via `any` per node:
+
+```python
+# Any step where |Ux| beats |Uy|
+mask = nr.where().predicate(
+    lambda df: df[("DISPLACEMENT", 1)].abs() > df[("DISPLACEMENT", 2)].abs()
+)
+```
+
+### Mask composition
+
+```python
+m_x   = nr.where().component("DISPLACEMENT", 1).abs_peak().gt(0.05)
+m_mag = nr.where().magnitude("DISPLACEMENT").peak().gt(0.06)
+
+both    = m_x & m_mag
+either  = m_x | m_mag
+not_x   = ~m_x
+hot     = nr[both]
+```
+
 ## Drift Analysis
 
 ### Relative displacement (delta_u)

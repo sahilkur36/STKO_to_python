@@ -11,6 +11,7 @@ import h5py
 if TYPE_CHECKING:
     from ..core.dataset import MPCODataSet
     from ..results.nodal_results_dataclass import NodalResults
+    from .selector import NodeSelector
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +156,33 @@ class NodeManager:
         self._get_all_nodes_ids()
         return self._node_index_df  # type: ignore
 
+    # ------------------------------------------------------------------
+    # Selector entry point
+    # ------------------------------------------------------------------
+
+    def select(self) -> "NodeSelector":
+        """Build a lazy, chainable node-id query.
+
+        Returns a fresh :class:`~STKO_to_python.nodes.selector.NodeSelector`
+        with no anchor; chain ``from_selection`` / ``with_ids`` to set
+        an explicit universe (required for ``~``), or apply spatial
+        primitives (``within_box``, ``nearest_to``, ``on_plane``,
+        ``near_line``, ``within_distance``, ``coord_in``, ``at_level``,
+        ``attached_to``) and a ``where(fn)`` predicate against the full
+        node set. Combine with ``&`` / ``|`` / ``~``.
+
+        Examples
+        --------
+        >>> ids = (dataset.nodes.select()
+        ...        .from_selection("Roof")
+        ...        .within_box(min=(0, 0, 28), max=(50, 50, 32))
+        ...        .nearest_to((25, 25, 30), k=8)
+        ...        .ids())
+        """
+        from .selector import NodeSelector
+
+        return NodeSelector(self)
+
     @staticmethod
     def _normalize_stages(stages, all_stages) -> Tuple[str, ...]:
         if stages is None:
@@ -270,11 +298,40 @@ class NodeManager:
         node_ids: Union[int, Sequence[int], Sequence[Sequence[int]], np.ndarray, None] = None,
         selection_set_id: Union[int, Sequence[int], None] = None,
         selection_set_name: Union[str, Sequence[str], None] = None,
+        selector: Optional["NodeSelector"] = None,
     ) -> "NodalResults":
         """Route through the dataset-owned query engine so every call
         benefits from the LRU cache. Thin wrapper; the actual read lives
         in :meth:`_fetch_nodal_results_uncached`.
+
+        Parameters
+        ----------
+        selector : NodeSelector, optional
+            Resolved id list from a chainable selector
+            (:meth:`NodeManager.select`). When provided, its ids are
+            merged with ``node_ids`` (union semantics).
         """
+        if selector is not None:
+            from .selector import NodeSelector
+
+            if not isinstance(selector, NodeSelector):
+                raise TypeError(
+                    "selector must be a NodeSelector instance "
+                    f"(got {type(selector).__name__})."
+                )
+            sel_ids = selector.ids()
+            if node_ids is None:
+                node_ids = sel_ids
+            else:
+                node_ids = np.unique(
+                    np.concatenate(
+                        [
+                            _flatten_node_ids(node_ids),
+                            sel_ids,
+                        ]
+                    )
+                )
+
         engine = getattr(self.dataset, "_nodal_query_engine", None)
         if engine is not None:
             return engine.fetch(

@@ -271,3 +271,8 @@ plt.show()
 For the full API reference and the time-spec grammar see
 [ElementResults — Element selectors](../api/element-results.md#element-selectors-pre-fetch)
 and [ElementResults — Result masks](../api/element-results.md#result-masks-post-fetch).
+
+The mirror-image recipe on the node side is documented in
+[Cookbook 06 — node selector + mask pipeline](06-node-selector-and-mask-pipeline.md);
+it covers `at_level`, `attached_to`, and the `magnitude(...)` reduction
+that has no element-side counterpart.
