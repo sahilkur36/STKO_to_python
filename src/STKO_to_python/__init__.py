@@ -3,8 +3,12 @@ from .core.dataset import MPCODataSet
 from .io.hdf5_utils import HDF5Utils
 
 from .nodes.node_manager import NodeManager
+from .nodes.selector import NodeSelector
+from .nodes.result_mask import NodeResultMask
 from .elements.element_manager import ElementManager
 from .elements.element_results import ElementResults
+from .elements.selector import ElementSelector
+from .elements.result_mask import ResultMask
 from .model.model_info_reader import ModelInfoReader
 from .model.cdata_reader import CDataReader
 
@@ -39,6 +43,10 @@ __all__ = [
     "Nodes",
     "Elements",
     "ElementResults",
+    "ElementSelector",
+    "ResultMask",
+    "NodeSelector",
+    "NodeResultMask",
     "Plot",
     "Aggregator",
     "StrOp",

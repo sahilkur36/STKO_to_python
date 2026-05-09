@@ -830,6 +830,46 @@ class NodalResults:
         )
 
     # ------------------------------------------------------------------ #
+    # Threshold / time-window query (parity with ElementResults.where)    #
+    # ------------------------------------------------------------------ #
+
+    def where(self, *, time: Any = None) -> Any:
+        """Start a threshold / time-window mask query.
+
+        Returns a ``_ResultQuery`` object; chain ``.component(result, comp)`` /
+        ``.magnitude(result)`` / ``.predicate(...)`` to build a
+        :class:`~STKO_to_python.nodes.result_mask.NodeResultMask`. The
+        ``time`` argument sets a default window for every reduction in
+        the chain (each reduction can override with its own ``time=``).
+
+        Examples
+        --------
+        >>> mask = (nr.where(time=(0.0, 10.0))
+        ...        .component("DISPLACEMENT", 1).abs_peak().gt(0.05))
+        >>> hot = nr[mask]                       # filtered NodalResults
+        >>> ids = mask.ids()                     # int64 array
+
+        >>> mask = (nr.where()
+        ...        .magnitude("DISPLACEMENT").peak().gt(0.05))
+        """
+        from ..nodes.result_mask import _ResultQuery
+
+        return _ResultQuery(self, default_time=time)
+
+    def __getitem__(self, key: Any) -> Any:
+        """Apply a :class:`NodeResultMask` (``nr[mask]``) to get a fresh
+        trimmed :class:`NodalResults`.
+        """
+        from ..nodes.result_mask import NodeResultMask
+
+        if isinstance(key, NodeResultMask):
+            return key.apply()
+        raise TypeError(
+            f"NodalResults[...] expects a NodeResultMask; got "
+            f"{type(key).__name__}."
+        )
+
+    # ------------------------------------------------------------------ #
     # Dynamic attribute access
     # ------------------------------------------------------------------ #
 

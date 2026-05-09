@@ -101,6 +101,8 @@ nav:
       - Stress contour on a shear wall: cookbook/02-stress-contour-on-a-wall.md
       - Peak moment per beam over a pushover: cookbook/03-peak-moment-per-beam.md
       - Volume integral on bricks: cookbook/04-volume-integral-on-bricks.md
+      - Element selector + mask pipeline: cookbook/05-selector-and-mask-pipeline.md
+      - Node selector + mask pipeline: cookbook/06-node-selector-and-mask-pipeline.md
   - Examples:
       - Usage tour: examples/usage_tour.md
       - Elastic frame: examples/elastic_frame.md

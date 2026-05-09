@@ -75,6 +75,17 @@ ds.plot.xy(
   for the element result container, including `physical_coords()`,
   `integrate_canonical()`, time-series statistics, and the new
   `plot.history()` / `plot.diagram()` / `plot.scatter()` plotters.
+- **[NodalResults reference](api/nodal-results.md)** — full API for
+  the nodal result container, including `ds.nodes.select()`
+  (chainable spatial picks, `attached_to(...)` element bridge) and
+  `nr.where(...)` (component / vector-magnitude masks with
+  `& / | / ~` composition).
+- **Cookbook —**
+  [Element selector + mask pipeline](cookbook/05-selector-and-mask-pipeline.md)
+  and
+  [Node selector + mask pipeline](cookbook/06-node-selector-and-mask-pipeline.md)
+  are the recipe-style introductions to the lazy-query / value-mask
+  workflow on each side.
 - **[Architecture](architecture.md)** — the layered design, what lives
   where, pickle compatibility, and the per-phase refactor history.
 - **[API reference](api/index.md)** — class-by-class docs generated
