@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, Optional, Sequence, Tuple, Union
 import numpy as np
 import matplotlib.pyplot as plt
 
-from .beam_solid import plot_beam_solids
+from .beam_solid import plot_beam_solids, plot_beam_solids_deformed
 from .deformed_shape import plot_deformed_shape, plot_undeformed_shape
 from .mesh import plot_mesh, plot_mesh_with_contour
 
@@ -305,6 +305,62 @@ class Plot:
         """
         return plot_beam_solids(
             self._dataset,
+            element_ids=element_ids,
+            selection_set_id=selection_set_id,
+            selection_set_name=selection_set_name,
+            ax=ax,
+            face_color=face_color,
+            edge_color=edge_color,
+            linewidth=linewidth,
+            alpha=alpha,
+            title=title,
+        )
+
+    def beam_solids_deformed(
+        self,
+        *,
+        model_stage: str,
+        step: int,
+        scale: float = 1.0,
+        element_ids: Union[int, Sequence[int], np.ndarray, None] = None,
+        selection_set_id: Union[int, Sequence[int], None] = None,
+        selection_set_name: Union[str, Sequence[str], None] = None,
+        ax: Any = None,
+        face_color: Any = "C0",
+        edge_color: Optional[Any] = "0.25",
+        linewidth: float = 0.6,
+        alpha: float = 0.85,
+        title: Optional[str] = None,
+    ) -> Tuple[Any, dict]:
+        """Render beam elements as 3D extruded solids at a deformed step.
+
+        Same pipeline as :meth:`beam_solids` with end-node coordinates
+        replaced by ``original + scale * displacement_at_step``. The
+        cross-section's element-local frame is taken from the
+        undeformed ``*LOCAL_AXES`` quaternion (STKO does not record a
+        deformed local frame), so large rotations on slender beams may
+        look slightly off; this is acceptable for visualization but
+        not for downstream geometry consumers.
+
+        See
+        :func:`STKO_to_python.plotting.beam_solid.plot_beam_solids_deformed`
+        for the full parameter list. ``meta`` carries the same keys as
+        :meth:`beam_solids` plus ``model_stage``, ``step``, and
+        ``scale``.
+
+        Examples
+        --------
+        First-mode shape at peak displacement, amplified 200×::
+
+            ax, meta = ds.plot.beam_solids_deformed(
+                model_stage="MODEL_STAGE[1]", step=peak_step, scale=200.0,
+            )
+        """
+        return plot_beam_solids_deformed(
+            self._dataset,
+            model_stage=model_stage,
+            step=step,
+            scale=scale,
             element_ids=element_ids,
             selection_set_id=selection_set_id,
             selection_set_name=selection_set_name,

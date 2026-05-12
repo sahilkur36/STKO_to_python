@@ -192,6 +192,277 @@ def _structural_edge_segments(
     return np.asarray(segs, dtype=float)
 
 
+def _resolve_target_beam_ids(
+    dataset: "MPCODataSet",
+    *,
+    element_ids: Union[int, Sequence[int], np.ndarray, None],
+    selection_set_id: Union[int, Sequence[int], None],
+    selection_set_name: Union[str, Sequence[str], None],
+) -> List[int]:
+    """Return the sorted list of element ids to extrude.
+
+    Validates that the cdata sidecar carries beam profiles and
+    assignments, then intersects the user filter (if any) with the
+    set of elements that actually have an assignment.
+
+    Raises:
+        ValueError: if the sidecar is empty or the filter produces no
+            matching elements.
+    """
+    assignments = dataset.cdata.beam_profile_assignments
+    profiles = dataset.cdata.beam_profiles
+    if not assignments:
+        raise ValueError(
+            "Dataset has no *BEAM_PROFILE_ASSIGNMENT entries in its "
+            ".cdata sidecar — nothing to render."
+        )
+    if not profiles:
+        raise ValueError(
+            "Dataset has no *BEAM_PROFILE entries in its .cdata sidecar — "
+            "assignments reference profile ids that aren't defined."
+        )
+
+    assignment_ids = {int(eid) for eid in assignments.keys()}
+
+    user_filtered = (
+        element_ids is not None
+        or selection_set_id is not None
+        or selection_set_name is not None
+    )
+    if user_filtered:
+        resolved = dataset._selection_resolver.resolve_elements(
+            names=selection_set_name,
+            ids=selection_set_id,
+            explicit_ids=element_ids,
+        )
+        target = sorted(assignment_ids & {int(e) for e in resolved})
+    else:
+        target = sorted(assignment_ids)
+
+    if not target:
+        raise ValueError(
+            "No beam elements with profile assignments matched the filter."
+        )
+    return target
+
+
+def _undeformed_node_coords(dataset: "MPCODataSet") -> Dict[int, np.ndarray]:
+    """Build the ``{node_id: (3,)}`` mapping from ``nodes_info``."""
+    df_nodes = dataset.nodes_info["dataframe"]
+    return {
+        int(row.node_id): np.array([row.x, row.y, row.z], dtype=float)
+        for row in df_nodes.itertuples(index=False)
+    }
+
+
+def _render_extruded_beams(
+    dataset: "MPCODataSet",
+    target: Sequence[int],
+    node_coords: Dict[int, np.ndarray],
+    *,
+    log_label: str,
+    ax: Any,
+    face_color: Any,
+    edge_color: Optional[Any],
+    linewidth: float,
+    alpha: float,
+    title: Optional[str],
+) -> Tuple[Any, Dict[str, Any]]:
+    """Build per-element extrusions and render the combined mesh.
+
+    Shared backbone of :func:`plot_beam_solids` and
+    :func:`plot_beam_solids_deformed`. The undeformed renderer feeds in
+    coordinates straight from ``nodes_info``; the deformed renderer
+    feeds in ``original + scale * displacement``. Everything downstream
+    — eligibility filtering, rotation lookup, per-element extrusion,
+    Poly3DCollection / Line3DCollection assembly, framing — is identical.
+
+    ``log_label`` is the prefix used in INFO-level skip log lines and
+    the RuntimeWarning, so users can tell ``plot_beam_solids`` and
+    ``plot_beam_solids_deformed`` apart in mixed logs.
+    """
+    assignments = dataset.cdata.beam_profile_assignments
+    profiles = dataset.cdata.beam_profiles
+    local_axes = dataset.cdata.local_axes
+    section_offsets = dataset.cdata.section_offsets
+    elements_by_id = dataset.elements_info["dataframe"].set_index(
+        "element_id", drop=False
+    )
+
+    # Eligibility = subset of target with a *LOCAL_AXES entry, so the
+    # vectorized rotation_matrices call doesn't raise.
+    skipped: List[int] = []
+    eligible_ids: List[int] = []
+    for eid in target:
+        if eid not in local_axes:
+            skipped.append(eid)
+            logger.info(
+                "%s: skipping element %d — no *LOCAL_AXES entry",
+                log_label,
+                eid,
+            )
+            continue
+        eligible_ids.append(eid)
+
+    if not eligible_ids:
+        raise ValueError(
+            "All matched elements lacked *LOCAL_AXES entries; nothing to draw."
+        )
+
+    ids_arr, R_batch = dataset.cdata.rotation_matrices(eligible_ids)
+    R_by_id = {int(eid): R for eid, R in zip(ids_arr.tolist(), R_batch)}
+
+    all_vertices: List[np.ndarray] = []
+    all_faces: List[np.ndarray] = []
+    all_edge_segs: List[np.ndarray] = []
+    profile_ids_used: set = set()
+    vertex_offset = 0
+
+    for eid in eligible_ids:
+        # Variable cross-section is deferred — pick the first profile.
+        pid, _weight = assignments[eid][0]
+        profile = profiles.get(int(pid))
+        if profile is None:
+            skipped.append(eid)
+            logger.info(
+                "%s: skipping element %d — profile id %d not in beam_profiles",
+                log_label,
+                eid,
+                pid,
+            )
+            continue
+
+        try:
+            elem_row = elements_by_id.loc[eid]
+        except KeyError:
+            skipped.append(eid)
+            logger.info(
+                "%s: skipping element %d — not in elements_info",
+                log_label,
+                eid,
+            )
+            continue
+
+        node_list = elem_row["node_list"]
+        if len(node_list) != 2:
+            skipped.append(eid)
+            logger.info(
+                "%s: skipping element %d — expected 2-node line element, got %d nodes",
+                log_label,
+                eid,
+                len(node_list),
+            )
+            continue
+        try:
+            n0 = node_coords[int(node_list[0])]
+            n1 = node_coords[int(node_list[1])]
+        except KeyError:
+            skipped.append(eid)
+            logger.info(
+                "%s: skipping element %d — node not in nodes_info",
+                log_label,
+                eid,
+            )
+            continue
+
+        R = R_by_id[eid]
+        offset_xy = section_offsets.get(eid)
+        vertices, faces = extrude_beam_geometry(
+            profile,
+            axis_start=n0,
+            axis_end=n1,
+            R=R,
+            section_offset=offset_xy,
+        )
+        all_vertices.append(vertices)
+        all_faces.append(faces + vertex_offset)
+        if edge_color is not None:
+            n_pts = profile.points.shape[0]
+            end1 = vertices[:n_pts]
+            end2 = vertices[n_pts:]
+            all_edge_segs.append(_structural_edge_segments(profile, end1, end2))
+        vertex_offset += vertices.shape[0]
+        profile_ids_used.add(int(pid))
+
+    if not all_vertices:
+        raise ValueError(
+            "Every matched element was skipped; check the logger output "
+            "for individual reasons (no profile, no local axes, etc.)."
+        )
+
+    combined_vertices = np.vstack(all_vertices)
+    combined_faces = np.vstack(all_faces)
+    polygons = combined_vertices[combined_faces]
+
+    if ax is None:
+        import matplotlib.pyplot as plt
+
+        fig = plt.figure()
+        ax = fig.add_subplot(111, projection="3d")
+
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+    poly = Poly3DCollection(
+        polygons,
+        facecolors=face_color,
+        edgecolors="none",
+        linewidths=0.0,
+        alpha=alpha,
+    )
+    ax.add_collection3d(poly)
+
+    if edge_color is not None and all_edge_segs:
+        from mpl_toolkits.mplot3d.art3d import Line3DCollection
+
+        edge_array = np.vstack(all_edge_segs)
+        line_coll = Line3DCollection(
+            edge_array,
+            colors=edge_color,
+            linewidths=linewidth,
+            alpha=1.0,
+        )
+        ax.add_collection3d(line_coll)
+
+    from .deformed_shape import _autoscale_axes
+
+    _autoscale_axes(ax, combined_vertices, is_3d=True)
+
+    # Equal-aspect 3D box — see plot_beam_solids docstring for rationale.
+    spans = np.array(
+        [
+            ax.get_xlim3d(),
+            ax.get_ylim3d(),
+            ax.get_zlim3d(),
+        ],
+        dtype=float,
+    )
+    span_lengths = spans[:, 1] - spans[:, 0]
+    if np.all(span_lengths > 0):
+        ax.set_box_aspect(tuple(span_lengths))
+
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.set_zlabel("z")
+    if title is not None:
+        ax.set_title(title)
+
+    if skipped:
+        warnings.warn(
+            f"[{log_label}] Skipped {len(skipped)} elements "
+            f"(see INFO log for details).",
+            RuntimeWarning,
+        )
+
+    meta: Dict[str, Any] = {
+        "element_count": len(all_vertices),
+        "triangle_count": int(combined_faces.shape[0]),
+        "skipped_elements": skipped,
+        "profile_ids": sorted(profile_ids_used),
+        "is_3d": True,
+    }
+    return ax, meta
+
+
 def plot_beam_solids(
     dataset: "MPCODataSet",
     *,
@@ -216,6 +487,10 @@ def plot_beam_solids(
     (section perimeter at both ends + sweep longitudinals; no interior
     triangulation edges) is overlaid via
     :class:`~mpl_toolkits.mplot3d.art3d.Line3DCollection`.
+
+    The renderer auto-sets the 3D box aspect from the data ranges
+    because matplotlib's default unit cube makes beams look squashed
+    when one dimension dominates.
 
     Args:
         dataset: Source :class:`MPCODataSet`.
@@ -258,235 +533,131 @@ def plot_beam_solids(
             assignments at all, or if the filter resolves to zero
             elements with assignments.
     """
-    assignments = dataset.cdata.beam_profile_assignments
-    profiles = dataset.cdata.beam_profiles
-    if not assignments:
-        raise ValueError(
-            "Dataset has no *BEAM_PROFILE_ASSIGNMENT entries in its "
-            ".cdata sidecar — nothing to render."
-        )
-    if not profiles:
-        raise ValueError(
-            "Dataset has no *BEAM_PROFILE entries in its .cdata sidecar — "
-            "assignments reference profile ids that aren't defined."
-        )
-
-    assignment_ids = {int(eid) for eid in assignments.keys()}
-
-    user_filtered = (
-        element_ids is not None
-        or selection_set_id is not None
-        or selection_set_name is not None
+    target = _resolve_target_beam_ids(
+        dataset,
+        element_ids=element_ids,
+        selection_set_id=selection_set_id,
+        selection_set_name=selection_set_name,
     )
-    if user_filtered:
-        resolved = dataset._selection_resolver.resolve_elements(
-            names=selection_set_name,
-            ids=selection_set_id,
-            explicit_ids=element_ids,
-        )
-        target = sorted(assignment_ids & {int(e) for e in resolved})
-    else:
-        target = sorted(assignment_ids)
-
-    if not target:
-        raise ValueError(
-            "No beam elements with profile assignments matched the filter."
-        )
-
-    # Pull every element's end-node coords from the cached dataframe in
-    # one pass; build an eid → (n0_xyz, n1_xyz) lookup so we don't pay
-    # per-element dataframe filtering inside the geometry loop.
-    df_elements = dataset.elements_info["dataframe"]
-    df_nodes = dataset.nodes_info["dataframe"]
-    node_coords = {
-        int(row.node_id): np.array([row.x, row.y, row.z], dtype=float)
-        for row in df_nodes.itertuples(index=False)
-    }
-    elements_by_id = df_elements.set_index("element_id", drop=False)
-
-    # Vectorized rotation lookup. Elements without *LOCAL_AXES are
-    # filtered out before this call so rotation_matrices doesn't raise.
-    local_axes = dataset.cdata.local_axes
-    section_offsets = dataset.cdata.section_offsets
-
-    skipped: List[int] = []
-    eligible_ids: List[int] = []
-    for eid in target:
-        if eid not in local_axes:
-            skipped.append(eid)
-            logger.info(
-                "plot_beam_solids: skipping element %d — no *LOCAL_AXES entry",
-                eid,
-            )
-            continue
-        eligible_ids.append(eid)
-
-    if not eligible_ids:
-        raise ValueError(
-            "All matched elements lacked *LOCAL_AXES entries; nothing to draw."
-        )
-
-    ids_arr, R_batch = dataset.cdata.rotation_matrices(eligible_ids)
-    # ids_arr should align with eligible_ids after the rotation_matrices
-    # call sorts. Re-key R by element id so the geometry loop is clear.
-    R_by_id = {int(eid): R for eid, R in zip(ids_arr.tolist(), R_batch)}
-
-    # Per-element accumulators. Concatenate vertices/faces with running
-    # offsets so the final Poly3DCollection sees one big batch.
-    all_vertices: List[np.ndarray] = []
-    all_faces: List[np.ndarray] = []
-    all_edge_segs: List[np.ndarray] = []
-    profile_ids_used: set = set()
-    vertex_offset = 0
-
-    for eid in eligible_ids:
-        # Resolve profile (first assignment for v1 — variable cross-section
-        # is a future extension).
-        pid, _weight = assignments[eid][0]
-        profile = profiles.get(int(pid))
-        if profile is None:
-            skipped.append(eid)
-            logger.info(
-                "plot_beam_solids: skipping element %d — profile id %d not in beam_profiles",
-                eid,
-                pid,
-            )
-            continue
-
-        try:
-            elem_row = elements_by_id.loc[eid]
-        except KeyError:
-            skipped.append(eid)
-            logger.info(
-                "plot_beam_solids: skipping element %d — not in elements_info",
-                eid,
-            )
-            continue
-
-        node_list = elem_row["node_list"]
-        if len(node_list) != 2:
-            # Beam profile assignments shouldn't exist for non-line
-            # elements, but guard anyway.
-            skipped.append(eid)
-            logger.info(
-                "plot_beam_solids: skipping element %d — expected 2-node line element, got %d nodes",
-                eid,
-                len(node_list),
-            )
-            continue
-        try:
-            n0 = node_coords[int(node_list[0])]
-            n1 = node_coords[int(node_list[1])]
-        except KeyError:
-            skipped.append(eid)
-            logger.info(
-                "plot_beam_solids: skipping element %d — node not in nodes_info",
-                eid,
-            )
-            continue
-
-        R = R_by_id[eid]
-        offset_xy = section_offsets.get(eid)  # may be None
-        vertices, faces = extrude_beam_geometry(
-            profile,
-            axis_start=n0,
-            axis_end=n1,
-            R=R,
-            section_offset=offset_xy,
-        )
-        all_vertices.append(vertices)
-        all_faces.append(faces + vertex_offset)
-        if edge_color is not None:
-            n_pts = profile.points.shape[0]
-            end1 = vertices[:n_pts]
-            end2 = vertices[n_pts:]
-            all_edge_segs.append(_structural_edge_segments(profile, end1, end2))
-        vertex_offset += vertices.shape[0]
-        profile_ids_used.add(int(pid))
-
-    if not all_vertices:
-        raise ValueError(
-            "Every matched element was skipped; check the logger output "
-            "for individual reasons (no profile, no local axes, etc.)."
-        )
-
-    combined_vertices = np.vstack(all_vertices)
-    combined_faces = np.vstack(all_faces)
-    polygons = combined_vertices[combined_faces]  # (n_faces, 3, 3)
-
-    # Axes creation. The output is inherently 3D — caller's `ax` must be
-    # a 3D axes if supplied, otherwise we make one.
-    if ax is None:
-        import matplotlib.pyplot as plt
-
-        fig = plt.figure()
-        ax = fig.add_subplot(111, projection="3d")
-
-    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-
-    poly = Poly3DCollection(
-        polygons,
-        facecolors=face_color,
-        edgecolors="none",
-        linewidths=0.0,
+    node_coords = _undeformed_node_coords(dataset)
+    return _render_extruded_beams(
+        dataset,
+        target,
+        node_coords,
+        log_label="plot_beam_solids",
+        ax=ax,
+        face_color=face_color,
+        edge_color=edge_color,
+        linewidth=linewidth,
         alpha=alpha,
+        title=title,
     )
-    ax.add_collection3d(poly)
 
-    if edge_color is not None and all_edge_segs:
-        from mpl_toolkits.mplot3d.art3d import Line3DCollection
 
-        edge_array = np.vstack(all_edge_segs)
-        line_coll = Line3DCollection(
-            edge_array,
-            colors=edge_color,
-            linewidths=linewidth,
-            alpha=1.0,
-        )
-        ax.add_collection3d(line_coll)
+def plot_beam_solids_deformed(
+    dataset: "MPCODataSet",
+    *,
+    model_stage: str,
+    step: int,
+    scale: float = 1.0,
+    element_ids: Union[int, Sequence[int], np.ndarray, None] = None,
+    selection_set_id: Union[int, Sequence[int], None] = None,
+    selection_set_name: Union[str, Sequence[str], None] = None,
+    ax: Any = None,
+    face_color: Any = "C0",
+    edge_color: Optional[Any] = "0.25",
+    linewidth: float = 0.6,
+    alpha: float = 0.85,
+    title: Optional[str] = None,
+) -> Tuple[Any, Dict[str, Any]]:
+    """Render beam elements as 3D extruded solids at a deformed configuration.
 
-    # Framing from the combined vertex cloud.
-    from .deformed_shape import _autoscale_axes
+    Same pipeline as :func:`plot_beam_solids`, but the end-node
+    coordinates are ``original + scale * displacement_at_step`` instead
+    of the original ``nodes_info`` coordinates. DISPLACEMENT is fetched
+    once (every node, the requested stage and step) and the deformed
+    map is passed through to the shared extrusion + render backbone.
 
-    _autoscale_axes(ax, combined_vertices, is_3d=True)
+    Note that the element-local rotation matrix is taken from the
+    undeformed ``*LOCAL_AXES`` quaternion. Large rotations of slender
+    beams will look slightly off because we are *not* rotating the
+    cross-section with the deformed tangent; STKO doesn't record the
+    deformed local frame and reconstructing it from displacements is
+    out of scope for this release.
 
-    # Equal-aspect 3D box. matplotlib's default 3D axes use a unit cube
-    # regardless of data extents, which makes beams look squashed when
-    # one dimension dominates. ``set_box_aspect`` accepts the post-pad
-    # span tuple so the visual proportions match the data.
-    spans = np.array(
-        [
-            ax.get_xlim3d(),
-            ax.get_ylim3d(),
-            ax.get_zlim3d(),
-        ],
-        dtype=float,
+    Args:
+        dataset: Source :class:`MPCODataSet`.
+        model_stage: Stage name (e.g. ``"MODEL_STAGE[1]"``).
+        step: Step index inside the stage.
+        scale: Displacement amplification. ``1.0`` is true-to-life; for
+            elastic models 50–1000× is typical.
+        element_ids: Optional explicit element IDs (see
+            :func:`plot_beam_solids` for filter semantics).
+        selection_set_id: Optional selection-set ID (or sequence).
+        selection_set_name: Optional selection-set name (or sequence).
+        ax: Existing 3D matplotlib axes. ``None`` creates a new figure.
+        face_color: Polygon fill color.
+        edge_color: Structural-edge color, or ``None`` to disable.
+        linewidth: Width of structural edges.
+        alpha: Polygon alpha.
+        title: Optional axes title.
+
+    Returns:
+        ``(ax, meta)``. ``meta`` carries the same keys as
+        :func:`plot_beam_solids` plus:
+
+        * ``model_stage`` — the stage rendered.
+        * ``step`` — the step rendered.
+        * ``scale`` — the displacement amplification applied.
+
+    Raises:
+        ValueError: if the cdata sidecar is empty, the filter matches
+            nothing, or the requested step is not present in the
+            DISPLACEMENT result for the chosen stage.
+    """
+    from .deformed_shape import _displacement_at_step
+
+    target = _resolve_target_beam_ids(
+        dataset,
+        element_ids=element_ids,
+        selection_set_id=selection_set_id,
+        selection_set_name=selection_set_name,
     )
-    span_lengths = spans[:, 1] - spans[:, 0]
-    if np.all(span_lengths > 0):
-        ax.set_box_aspect(tuple(span_lengths))
-
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
-    ax.set_zlabel("z")
-    if title is not None:
-        ax.set_title(title)
-
-    if skipped:
-        warnings.warn(
-            f"[plot_beam_solids] Skipped {len(skipped)} elements "
-            f"(see INFO log for details).",
-            RuntimeWarning,
+    original = _undeformed_node_coords(dataset)
+    if scale == 0.0:
+        # Zero scale collapses to the undeformed configuration; skip the
+        # DISPLACEMENT fetch entirely so the function works on datasets
+        # that don't record displacements.
+        deformed = original
+    else:
+        disp = _displacement_at_step(
+            dataset, model_stage=model_stage, step=int(step)
         )
+        deformed = {}
+        for nid, xyz in original.items():
+            d = disp.get(nid)
+            deformed[nid] = xyz + float(scale) * d if d is not None else xyz.copy()
 
-    meta: Dict[str, Any] = {
-        "element_count": len(all_vertices),
-        "triangle_count": int(combined_faces.shape[0]),
-        "skipped_elements": skipped,
-        "profile_ids": sorted(profile_ids_used),
-        "is_3d": True,
-    }
+    ax, meta = _render_extruded_beams(
+        dataset,
+        target,
+        deformed,
+        log_label="plot_beam_solids_deformed",
+        ax=ax,
+        face_color=face_color,
+        edge_color=edge_color,
+        linewidth=linewidth,
+        alpha=alpha,
+        title=title,
+    )
+    meta["model_stage"] = model_stage
+    meta["step"] = int(step)
+    meta["scale"] = float(scale)
     return ax, meta
 
 
-__all__ = ["extrude_beam_geometry", "plot_beam_solids"]
+__all__ = [
+    "extrude_beam_geometry",
+    "plot_beam_solids",
+    "plot_beam_solids_deformed",
+]
