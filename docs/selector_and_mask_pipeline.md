@@ -123,7 +123,9 @@ An unanchored selector resolves over **every element in the index**
 
 ### 2.2 Anchors — set the universe
 
-Three ways to anchor:
+Seven ways to anchor: three over the element index itself, and four
+over the STKO names recorded in the `.cdata` sidecar (added in
+v1.3.0).
 
 ```python
 # By element class (decorated [bracket] suffix is stripped automatically)
@@ -140,17 +142,39 @@ walls = ds.elements.select().from_selection(["Walls", "Slabs"])  # several
 # By explicit ids
 some = ds.elements.select().with_ids([1, 5, 9])
 print(some.count())                 # 3
+
+# By STKO names from .cdata *ELEMENT_INFO (v1.3.0+)
+shells   = ds.elements.select().of_sub_geom_type("Face")           # Edge / Face / Solid
+slabs    = ds.elements.select().of_geometry("Slab")                # STKO parent geometry
+elastics = ds.elements.select().of_physical_property("elastic")    # material / section
+q4s      = ds.elements.select().of_element_property("Q4")          # element class name
 ```
+
+The four `of_geometry` / `of_physical_property` / `of_element_property` /
+`of_sub_geom_type` anchors resolve against
+`ds.cdata.element_info` — see
+[cookbook 07](cookbook/07-select-by-geometry-and-property.md) for an
+end-to-end walkthrough. They behave exactly like the three older
+anchors: AND-narrowing when stacked, valid universe for `~`, blocked
+on combinators (`a & b`).
 
 Anchors are the universe used by negation (`~`) — see §3.3.
 
-You can stack anchors (intersection):
+You can stack anchors (intersection) — including mixing classic and
+cdata-backed:
 
 ```python
 sel = (ds.elements.select()
        .of_type("DispBeamColumn3d")
        .with_ids([1, 5, 9, 99]))
 print(sel.ids().tolist())   # [1, 5, 9]   ← 99 is not in the index
+
+# Beams that are also load-bearing (filtering out rigid-link edges):
+loadbearing_beams = (
+    ds.elements.select()
+    .of_sub_geom_type("Edge")
+    .of_element_property("elasticBeamCol")
+)
 ```
 
 ### 2.3 Spatial primitives

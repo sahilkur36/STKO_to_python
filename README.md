@@ -94,6 +94,14 @@ pytest tests/ -q                 # full test suite (unit + integration)
 pytest bench/ -q                 # benchmarks (requires the `bench` extra)
 ```
 
-Test suite is **349 green** as of Phase 5. Benchmarks are opt-in and
+The unit suite runs in a few seconds. Benchmarks are opt-in and
 scoped to `bench/` so the default `pytest tests/` command doesn't pay
 their collection overhead.
+
+## What's new
+
+Per-release notes live in [`CHANGELOG.md`](CHANGELOG.md). The latest
+release, **v1.3.0**, parses every section of the `.cdata` sidecar
+(not just `*SELECTION_SET`) and adds *select-by-STKO-geometry-name*
+anchors on `ElementSelector` — see [cookbook 07](docs/cookbook/07-select-by-geometry-and-property.md)
+for the walkthrough.
