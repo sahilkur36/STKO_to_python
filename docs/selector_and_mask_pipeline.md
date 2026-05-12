@@ -1059,5 +1059,5 @@ er[m]                                                   # fresh ElementResults
 ```
 
 For the underlying type signatures see
-[ElementResults — Element selectors](../api/element-results.md#element-selectors-pre-fetch)
-and [ElementResults — Result masks](../api/element-results.md#result-masks-post-fetch).
+[ElementResults — Element selectors](api/element-results.md#element-selectors-pre-fetch)
+and [ElementResults — Result masks](api/element-results.md#result-masks-post-fetch).
