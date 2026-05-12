@@ -17,6 +17,7 @@ workflows the library is built around. Each tutorial:
 | 4 | [Volume integral of σ_11 over a brick subdomain](04-volume-integral-on-bricks.md) | `solid_partition_example` (gitignored — skip-if-absent) | `56-Brick` |
 | 5 | [Element selector + mask pipeline](05-selector-and-mask-pipeline.md) | `elasticFrame/elasticFrame_mesh_displacementBased_results` | `64-DispBeamColumn3d` |
 | 6 | [Node selector + mask pipeline](06-node-selector-and-mask-pipeline.md) | `elasticFrame/elasticFrame_mesh_displacementBased_results` | (node-side; any element family) |
+| 7 | [Select by STKO geometry and property name](07-select-by-geometry-and-property.md) | `elasticFrame/QuadFrame_results` | `203-ASDShellQ4` + `5-ElasticBeam3d` |
 
 For broader tours of the API on a single fixture see the
 [Examples](../examples/usage_tour.md) section. For the reference
