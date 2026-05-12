@@ -12,8 +12,37 @@ spelled out in [`CLAUDE.md`](CLAUDE.md#versioning-policy):
 
 ## [Unreleased]
 
+_Nothing pending._
+
+---
+
+## [1.5.0] — 2026-05-12
+
+Builds 3D beam visualization on top of the v1.3 / v1.4 cdata-sidecar
+work: `ds.plot.beam_solids` and `ds.plot.beam_solids_deformed` extrude
+beam elements as section solids, driven by the parsed
+`*BEAM_PROFILE`, `*BEAM_PROFILE_ASSIGNMENT`, `*LOCAL_AXES`, and
+`*SECTION_OFFSET` blocks. Cdata parsing also becomes lazy on the
+dataset, so workflows that don't touch selection sets or beam viz
+skip the parse entirely.
+
 ### Added
 
+- **`ds.plot.beam_solids(...)`** — new method on the dataset plot
+  facade that renders beam elements as 3D extruded section solids,
+  using the cdata sidecar's `*BEAM_PROFILE`,
+  `*BEAM_PROFILE_ASSIGNMENT`, `*LOCAL_AXES`, and `*SECTION_OFFSET`
+  blocks. Builds one triangle batch per beam, accumulates a single
+  `Poly3DCollection` for the fill, and overlays the section
+  perimeters + sweep longitudinals as a `Line3DCollection` (interior
+  triangulation edges intentionally suppressed). Accepts the same
+  `element_ids` / `selection_set_id` / `selection_set_name` filter as
+  the rest of the plot facade and silently filters out elements that
+  aren't beams. Auto-sets the 3D box aspect from the data ranges so
+  beams don't render squashed by matplotlib's default unit cube.
+  Returns `(ax, meta)` with `element_count`, `triangle_count`,
+  `skipped_elements`, and `profile_ids`
+  ([#70](https://github.com/nmorabowen/STKO_to_python/pull/70)).
 - **`ds.plot.beam_solids_deformed(model_stage, step, scale=1.0, ...)`** —
   deformed twin of `ds.plot.beam_solids`. Fetches `DISPLACEMENT` at the
   requested step, shifts every end node by `scale * disp`, and feeds
@@ -24,29 +53,16 @@ spelled out in [`CLAUDE.md`](CLAUDE.md#versioning-policy):
   frame is taken from the undeformed `*LOCAL_AXES` quaternion — STKO
   does not record a deformed local frame, so translations are exact
   but large rotations on slender members may show a slightly off
-  section orientation (documented in the cookbook recipe).
-- Cookbook recipe 09 extended with a "Render the deformed
-  configuration" section covering scale selection and the
-  undeformed-local-frame caveat.
-
-- **`ds.plot.beam_solids(...)`** — new method on the dataset plot
-  facade that renders beam elements as 3D extruded section solids,
-  using the cdata sidecar's `*BEAM_PROFILE`,
-  `*BEAM_PROFILE_ASSIGNMENT`, `*LOCAL_AXES`, and `*SECTION_OFFSET`
-  blocks. Builds one triangle batch per beam via the geometry kernel
-  added previously, accumulates a single
-  `Poly3DCollection` for the fill, and overlays the section perimeters
-  + sweep longitudinals as a `Line3DCollection` (interior
-  triangulation edges intentionally suppressed). Accepts the same
-  `element_ids` / `selection_set_id` / `selection_set_name` filter as
-  the rest of the plot facade and silently filters out elements that
-  aren't beams. Returns `(ax, meta)` with `element_count`,
-  `triangle_count`, `skipped_elements`, and `profile_ids`.
+  section orientation (documented in the cookbook recipe)
+  ([#71](https://github.com/nmorabowen/STKO_to_python/pull/71)).
 - New cookbook recipe
   [09 — Render beams as 3D extruded solids](docs/cookbook/09-render-beam-solids.md)
-  walks through the default render, selection-set filtering,
-  composition with the shell mesh, and the low-level geometry-kernel
-  escape hatch.
+  covers the default render, selection-set filtering, composition
+  with the shell mesh, the low-level geometry-kernel escape hatch,
+  and the deformed-configuration render with scale-selection
+  guidance
+  ([#70](https://github.com/nmorabowen/STKO_to_python/pull/70),
+  [#71](https://github.com/nmorabowen/STKO_to_python/pull/71)).
 
 ### Added (internal)
 
@@ -54,8 +70,9 @@ spelled out in [`CLAUDE.md`](CLAUDE.md#versioning-policy):
   pure-numpy helper that sweeps a `BeamProfile` between two beam
   endpoints (with optional `*SECTION_OFFSET`) and returns
   `(vertices, faces)` as a 3D triangle mesh. Foundation for the
-  `ds.plot.beam_solids` rendering wrapper; the geometry function is
-  matplotlib-free so it can be unit-tested without a display backend.
+  `ds.plot.beam_solids` rendering wrapper; matplotlib-free so it can
+  be unit-tested without a display backend
+  ([#69](https://github.com/nmorabowen/STKO_to_python/pull/69)).
 
 ### Changed (internal)
 
@@ -64,35 +81,41 @@ spelled out in [`CLAUDE.md`](CLAUDE.md#versioning-policy):
   longer parses the `.cdata` selection-set blocks; the parse triggers
   on first access. Workflows that only fetch element results without
   passing `selection_set_*` arguments now skip the cdata parse
-  entirely.
+  entirely
+  ([#68](https://github.com/nmorabowen/STKO_to_python/pull/68)).
 - `NodalResultsQueryEngine` and `ElementResultsQueryEngine` no longer
   take `resolver=` in their constructor; they read
   `dataset._selection_resolver` at query time. Internal refactor —
   the public managers (`Nodes.get_nodal_results`,
-  `Elements.get_element_results`) behave identically.
+  `Elements.get_element_results`) behave identically
+  ([#68](https://github.com/nmorabowen/STKO_to_python/pull/68)).
 
 ### Test coverage
 
-- Added two regression guards under
-  `tests/unit/selection/test_dataset_resolver_integration.py`:
-  - `selection_set` / `_selection_resolver` are absent from
-    `ds.__dict__` immediately after construction.
-  - Repeat access returns the same cached object.
-- Added `tests/unit/test_beam_extrude.py` (13 tests) covering the
+- Two regression guards under
+  `tests/unit/selection/test_dataset_resolver_integration.py` pin the
+  laziness contract: `selection_set` and `_selection_resolver` absent
+  from `ds.__dict__` immediately after construction, and repeat
+  access returns the same cached object
+  ([#68](https://github.com/nmorabowen/STKO_to_python/pull/68)).
+- `tests/unit/test_beam_extrude.py` (13 tests) covers the
   geometry-helper contract: vertex placement under identity / rotated
   frames, section-offset translation, cap winding, side-surface
-  triangulation from the sweep loop, and degenerate profiles (no
-  triangles, no sweeps). Includes a real-fixture smoke check on the
-  `elasticFrame/results` beam profile.
-- Added `tests/integration/test_beam_solids.py` (12 tests) exercising
-  the `ds.plot.beam_solids` and `ds.plot.beam_solids_deformed`
-  renderers on both single-partition (`elasticFrame/results`, 3 beams)
-  and multi-class (`elasticFrame/QuadFrame_results`, 75 beams + 625
+  triangulation from the sweep loop, and degenerate profiles.
+  Includes a real-fixture smoke check on the `elasticFrame/results`
+  beam profile
+  ([#69](https://github.com/nmorabowen/STKO_to_python/pull/69)).
+- `tests/integration/test_beam_solids.py` (12 tests) exercises the
+  `ds.plot.beam_solids` and `ds.plot.beam_solids_deformed` renderers
+  on single-partition (`elasticFrame/results`, 3 beams) and
+  multi-class (`elasticFrame/QuadFrame_results`, 75 beams + 625
   shells) fixtures. Pins the `(ax, meta)` contract, filter behavior,
   the `edge_color=None` switch, user-supplied 3D axes composition,
   the deformed `scale=0` short-circuit, and a monkeypatched
   displacement test that proves the scaled displacement flows into
-  the rendered vertex positions.
+  the rendered vertex positions
+  ([#70](https://github.com/nmorabowen/STKO_to_python/pull/70),
+  [#71](https://github.com/nmorabowen/STKO_to_python/pull/71)).
 
 ---
 
