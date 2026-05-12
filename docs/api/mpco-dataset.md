@@ -33,7 +33,26 @@ ds = MPCODataSet(
 | `ds.time` | `pd.DataFrame` | Time array per stage |
 | `ds.nodes` | `NodeManager` | Nodal result manager |
 | `ds.elements` | `ElementManager` | Element result manager |
+| `ds.cdata` | `CDataReader` | Parsed `.cdata` sections (see below) |
 | `ds.plot` | plot facade | Dataset-level XY plotter |
+
+### `ds.cdata` accessors
+
+The reader parses the `.cdata` sidecar once at construction; each
+accessor below is a `cached_property` over the result:
+
+| Accessor | Type | Source section |
+|---|---|---|
+| `ds.cdata.element_info` | `dict[int, ElementInfo]` | `*ELEMENT_INFO` |
+| `ds.cdata.local_axes` | `dict[int, ndarray(4,)]` | `*LOCAL_AXES` |
+| `ds.cdata.section_offsets` | `dict[int, ndarray(2,)]` | `*SECTION_OFFSET` |
+| `ds.cdata.beam_profiles` | `dict[int, BeamProfile]` | `*BEAM_PROFILE` |
+| `ds.cdata.beam_profile_assignments` | `dict[int, list[(int, float)]]` | `*BEAM_PROFILE_ASSIGNMENT` |
+
+`ElementInfo` and `BeamProfile` are frozen dataclasses re-exported
+at the top level. `element_info` is what powers the
+`select().of_geometry(...)` / `.of_physical_property(...)` family of
+`ElementSelector` anchors.
 
 ---
 

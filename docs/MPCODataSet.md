@@ -48,7 +48,30 @@ ds.selection_set           # dict — {id: {'SET_NAME': ..., 'NODES': [...], 'EL
 ds.results_partitions      # dict — {file_id: filepath}
 ds.nodes_info              # dict — {'array': np.ndarray, 'dataframe': pd.DataFrame}
 ds.elements_info           # dict — {'array': np.ndarray, 'dataframe': pd.DataFrame}
+ds.cdata                   # CDataReader — see "STKO metadata via cdata" below
 ```
+
+## STKO metadata via `cdata`
+
+`ds.cdata` is a `CDataReader` that exposes every section the
+`.cdata` sidecar carries — parsed once at construction:
+
+```python
+ds.cdata.element_info               # {elem_id: ElementInfo}
+ds.cdata.local_axes                 # {elem_id: ndarray([qw, qx, qy, qz])}
+ds.cdata.section_offsets            # {elem_id: ndarray([yOff, zOff])}
+ds.cdata.beam_profiles              # {profile_id: BeamProfile}
+ds.cdata.beam_profile_assignments   # {elem_id: [(profile_id, weight), ...]}
+```
+
+`ElementInfo` is a frozen dataclass with the STKO names every element
+carries — parent geometry, sub-geometry type, physical/element
+property names. It's what powers the `select().of_geometry(...)`
+family of anchors. `BeamProfile` carries the 2D cross-section
+geometry of each profile (points, triangulation, edges, sweeps).
+
+See [cookbook 07 — Select by STKO geometry and property name](cookbook/07-select-by-geometry-and-property.md)
+for the end-to-end workflow.
 
 ## Exploring the Dataset
 

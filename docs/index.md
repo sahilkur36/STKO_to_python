@@ -86,6 +86,9 @@ ds.plot.xy(
   [Node selector + mask pipeline](cookbook/06-node-selector-and-mask-pipeline.md)
   are the recipe-style introductions to the lazy-query / value-mask
   workflow on each side.
+  [Select by STKO geometry and property name](cookbook/07-select-by-geometry-and-property.md)
+  (v1.3.0+) covers the cdata-backed `of_geometry` / `of_physical_property`
+  family of selector anchors.
 - **[Architecture](architecture.md)** — the layered design, what lives
   where, pickle compatibility, and the per-phase refactor history.
 - **[API reference](api/index.md)** — class-by-class docs generated
