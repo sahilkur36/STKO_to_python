@@ -110,6 +110,8 @@ nav:
       - Rotate beam-local forces to global: cookbook/08-rotate-beam-forces-to-global.md
       - Render beams as 3D extruded solids: cookbook/09-render-beam-solids.md
       - Section cuts through frames with shells: cookbook/10-section-cut-shells.md
+      - Section cuts through brick continua: cookbook/11-section-cut-solids.md
+      - Per-layer & per-fiber decomposition of layered-shell cuts: cookbook/12-section-cut-layered-shells.md
   - Examples:
       - Usage tour: examples/usage_tour.md
       - Elastic frame: examples/elastic_frame.md
