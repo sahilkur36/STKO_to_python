@@ -90,6 +90,7 @@ nav:
       - Query engines: api/query-engines.md
       - Plotting: api/plotting.md
       - MPCOResults: api/mpco-results.md
+      - Section cuts: api/section-cuts.md
       - Canonical names: api/canonical-names.md
   - Usage guides:
       - MPCODataSet: MPCODataSet.md
@@ -108,6 +109,7 @@ nav:
       - Select by STKO geometry and property name: cookbook/07-select-by-geometry-and-property.md
       - Rotate beam-local forces to global: cookbook/08-rotate-beam-forces-to-global.md
       - Render beams as 3D extruded solids: cookbook/09-render-beam-solids.md
+      - Section cuts through frames with shells: cookbook/10-section-cut-shells.md
   - Examples:
       - Usage tour: examples/usage_tour.md
       - Elastic frame: examples/elastic_frame.md

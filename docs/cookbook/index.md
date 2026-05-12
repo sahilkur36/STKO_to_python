@@ -20,6 +20,7 @@ workflows the library is built around. Each tutorial:
 | 7 | [Select by STKO geometry and property name](07-select-by-geometry-and-property.md) | `elasticFrame/QuadFrame_results` | `203-ASDShellQ4` + `5-ElasticBeam3d` |
 | 8 | [Rotate beam-local forces to global](08-rotate-beam-forces-to-global.md) | `elasticFrame/elasticFrame_mesh_results` | `5-ElasticBeam3d` |
 | 9 | [Render beams as 3D extruded solids](09-render-beam-solids.md) | `elasticFrame/QuadFrame_results` | `5-ElasticBeam3d` (+ shell backdrop) |
+| 10 | [Section cuts through frames with shells](10-section-cut-shells.md) | `Test_NLShell` (gitignored — skip-if-absent) | `203-ASDShellQ4` + `204-ASDShellT3` |
 
 For broader tours of the API on a single fixture see the
 [Examples](../examples/usage_tour.md) section. For the reference
