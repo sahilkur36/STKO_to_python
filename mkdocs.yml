@@ -117,3 +117,4 @@ nav:
       - Elastic frame: examples/elastic_frame.md
       - Quad-frame shells: examples/quad_frame_shell.md
       - Solid + fiber beam: examples/solid_mixed.md
+      - Section cuts (solids + layered shells): examples/section_cut_solid_and_layered.md
