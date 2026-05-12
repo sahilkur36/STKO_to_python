@@ -12,15 +12,35 @@ spelled out in [`CLAUDE.md`](CLAUDE.md#versioning-policy):
 
 ## [Unreleased]
 
+### Added
+
+- **`ds.plot.beam_solids(...)`** — new method on the dataset plot
+  facade that renders beam elements as 3D extruded section solids,
+  using the cdata sidecar's `*BEAM_PROFILE`,
+  `*BEAM_PROFILE_ASSIGNMENT`, `*LOCAL_AXES`, and `*SECTION_OFFSET`
+  blocks. Builds one triangle batch per beam via the geometry kernel
+  added previously, accumulates a single
+  `Poly3DCollection` for the fill, and overlays the section perimeters
+  + sweep longitudinals as a `Line3DCollection` (interior
+  triangulation edges intentionally suppressed). Accepts the same
+  `element_ids` / `selection_set_id` / `selection_set_name` filter as
+  the rest of the plot facade and silently filters out elements that
+  aren't beams. Returns `(ax, meta)` with `element_count`,
+  `triangle_count`, `skipped_elements`, and `profile_ids`.
+- New cookbook recipe
+  [09 — Render beams as 3D extruded solids](docs/cookbook/09-render-beam-solids.md)
+  walks through the default render, selection-set filtering,
+  composition with the shell mesh, and the low-level geometry-kernel
+  escape hatch.
+
 ### Added (internal)
 
 - `STKO_to_python.plotting.beam_solid.extrude_beam_geometry(...)` —
   pure-numpy helper that sweeps a `BeamProfile` between two beam
   endpoints (with optional `*SECTION_OFFSET`) and returns
   `(vertices, faces)` as a 3D triangle mesh. Foundation for the
-  upcoming `ds.plot.beam_solids` rendering wrapper; the geometry
-  function is matplotlib-free so it can be unit-tested without a
-  display backend.
+  `ds.plot.beam_solids` rendering wrapper; the geometry function is
+  matplotlib-free so it can be unit-tested without a display backend.
 
 ### Changed (internal)
 
@@ -49,6 +69,13 @@ spelled out in [`CLAUDE.md`](CLAUDE.md#versioning-policy):
   triangulation from the sweep loop, and degenerate profiles (no
   triangles, no sweeps). Includes a real-fixture smoke check on the
   `elasticFrame/results` beam profile.
+- Added `tests/integration/test_beam_solids.py` (7 tests) exercising
+  the `ds.plot.beam_solids` renderer on both single-partition
+  (`elasticFrame/results`, 3 beams) and multi-class
+  (`elasticFrame/QuadFrame_results`, 75 beams + 625 shells) fixtures.
+  Pins the `(ax, meta)` contract, the explicit-id and unknown-id
+  filter behavior, the `edge_color=None` switch, and composition with
+  a user-supplied 3D axes.
 
 ---
 
