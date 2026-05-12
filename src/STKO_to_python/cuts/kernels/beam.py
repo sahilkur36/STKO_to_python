@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
+    from ..geometry import PolygonClipper
     from ..specs import SectionCutSpec
     from ...core.dataset import MPCODataSet
 
@@ -94,6 +95,8 @@ def _strip_class_tag(decorated: str) -> str:
 def find_beam_intersections(
     dataset: "MPCODataSet",
     spec: "SectionCutSpec",
+    *,
+    clipper: "PolygonClipper | None" = None,
 ) -> list[BeamIntersection]:
     """Find intersections between ``spec.plane`` and every beam in the filter.
 
@@ -108,6 +111,8 @@ def find_beam_intersections(
     - It lies parallel within numerical tolerance (e.g. a horizontal
       beam exactly on a horizontal cut).
     - Its connectivity has anything other than two nodes.
+    - The intersection point lies outside ``spec.bounding_polygon``
+      (when one is provided via ``clipper``).
 
     Returns
     -------
@@ -154,6 +159,8 @@ def find_beam_intersections(
         if hit is None:
             continue
         point, t = hit
+        if clipper is not None and not clipper.point_inside(np.asarray(point, dtype=float)):
+            continue
         xi = 2.0 * t - 1.0
         out.append(
             BeamIntersection(

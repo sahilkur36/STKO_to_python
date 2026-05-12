@@ -84,6 +84,15 @@ class SectionCutSpec:
         Optional display label used by plotters.
     name:
         Optional human-readable identifier for logs and on-disk caches.
+    bounding_polygon:
+        Optional convex polygon on ``plane`` restricting the cut to
+        elements whose intersection falls inside it. Each vertex is a
+        ``(x, y, z)`` tuple lying on ``plane`` (within tolerance). At
+        least three vertices required. Useful when the recorded
+        selection sets don't pre-filter to the region of interest —
+        e.g. cut just the left half of a wall by passing a polygon on
+        the cut plane covering only that half. Non-convex polygons are
+        not supported in v1.6 (validated away at construction).
     """
 
     plane: Plane
@@ -93,6 +102,7 @@ class SectionCutSpec:
     side: Side = "positive"
     label: str | None = None
     name: str | None = None
+    bounding_polygon: tuple[tuple[float, float, float], ...] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.plane, Plane):
@@ -119,6 +129,10 @@ class SectionCutSpec:
             object.__setattr__(self, "element_ids", tup)
         if self.selection_set_id is not None:
             object.__setattr__(self, "selection_set_id", int(self.selection_set_id))
+        if self.bounding_polygon is not None:
+            poly = _coerce_polygon(self.bounding_polygon)
+            _validate_bounding_polygon(poly, self.plane)
+            object.__setattr__(self, "bounding_polygon", poly)
 
     @property
     def signed_normal(self) -> np.ndarray:
@@ -260,3 +274,73 @@ def _coerce_int_tuple(
         return tuple(int(x) for x in values)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{label} must contain integers: {exc}") from None
+
+
+def _coerce_polygon(
+    values: Iterable[Iterable[float]] | np.ndarray,
+) -> tuple[tuple[float, float, float], ...]:
+    """Normalise a polygon to a hashable ``tuple[tuple[float, float, float], ...]``.
+
+    Accepts any iterable of length-3 iterables or an ``(M, 3)`` ndarray.
+    """
+    arr = np.asarray(list(values), dtype=float)
+    if arr.ndim != 2 or arr.shape[1] != 3:
+        raise ValueError(
+            f"bounding_polygon must be a sequence of (x, y, z) triples or "
+            f"shape (M, 3); got shape {arr.shape}."
+        )
+    return tuple((float(v[0]), float(v[1]), float(v[2])) for v in arr)
+
+
+def _validate_bounding_polygon(
+    polygon: tuple[tuple[float, float, float], ...],
+    plane: Plane,
+    *,
+    tol: float = 1e-6,
+) -> None:
+    """Enforce the v1.6 contract on a ``bounding_polygon``.
+
+    - At least 3 vertices.
+    - All vertices must lie on ``plane`` (signed distance ≤ ``tol``).
+    - Non-degenerate planar area (after projection to the plane basis).
+    - Convex.
+
+    Non-convex polygons / off-plane vertices / degenerate polygons all
+    raise ``ValueError`` here so the misuse surfaces at construction
+    rather than producing silent zero-area cuts downstream.
+    """
+    if len(polygon) < 3:
+        raise ValueError(
+            f"bounding_polygon must have at least 3 vertices; got {len(polygon)}."
+        )
+    arr = np.asarray(polygon, dtype=float)
+    d = plane.signed_distance(arr)
+    if np.any(np.abs(d) > tol):
+        worst = float(np.max(np.abs(d)))
+        raise ValueError(
+            f"bounding_polygon must lie on the cut plane within tol={tol}; "
+            f"worst off-plane distance is {worst}."
+        )
+    # Lazy import — geometry depends on Plane, and Plane depends on
+    # nothing in geometry, so we keep them in different modules and
+    # import the helpers only where needed.
+    from .geometry import (
+        _plane_basis,
+        _polygon_signed_area_2d,
+        _project_to_plane_basis,
+        is_convex_2d,
+    )
+    e1, e2 = _plane_basis(plane)
+    poly_2d = _project_to_plane_basis(arr, plane, basis=(e1, e2))
+    area = abs(_polygon_signed_area_2d(poly_2d))
+    if area < tol:
+        raise ValueError(
+            f"bounding_polygon is degenerate (planar area {area} ≈ 0). "
+            "All vertices may be collinear or coincident."
+        )
+    if not is_convex_2d(poly_2d):
+        raise ValueError(
+            "bounding_polygon must be convex (Cyrus-Beck clipping in "
+            "v1.6 assumes convexity). For non-convex regions, decompose "
+            "into convex sub-polygons and call section_cut() per part."
+        )

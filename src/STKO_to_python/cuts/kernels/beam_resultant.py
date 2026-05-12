@@ -43,6 +43,7 @@ import numpy as np
 from .beam import BEAM_ELEMENT_CLASSES, BeamIntersection, _strip_class_tag, find_beam_intersections
 
 if TYPE_CHECKING:
+    from ..geometry import PolygonClipper
     from ..specs import SectionCutSpec
     from ...core.dataset import MPCODataSet
 
@@ -101,6 +102,7 @@ def compute_beam_cut(
     spec: "SectionCutSpec",
     *,
     model_stage: str,
+    clipper: "PolygonClipper | None" = None,
 ) -> BeamCutResult:
     """Compute the (F, M) resultant of a section cut through beams.
 
@@ -112,6 +114,12 @@ def compute_beam_cut(
         Cut specification (plane + filter + side).
     model_stage:
         Model stage to read from (e.g. ``"MODEL_STAGE[1]"``).
+    clipper:
+        Optional pre-built :class:`~..geometry.PolygonClipper`. When the
+        caller composes the beam + shell kernels together (via
+        :class:`SectionCut`) it builds this once and threads it through
+        both so the plane basis isn't recomputed. If ``None`` and
+        ``spec.bounding_polygon`` is set, a clipper is built here.
 
     Returns
     -------
@@ -119,8 +127,11 @@ def compute_beam_cut(
         Empty result (``F``/``M`` shape ``(0, 3)``) when no beam in the
         filter crosses the plane.
     """
+    if clipper is None and spec.bounding_polygon is not None:
+        from ..geometry import prepare_clipper
+        clipper = prepare_clipper(spec.plane, spec.bounding_polygon)
     intersections = _deduplicate_at_node_intersections(
-        find_beam_intersections(dataset, spec)
+        find_beam_intersections(dataset, spec, clipper=clipper)
     )
 
     # 2. Group by element type so we can batch a single result fetch per type.

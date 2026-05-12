@@ -12,6 +12,96 @@ spelled out in [`CLAUDE.md`](CLAUDE.md#versioning-policy):
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-05-12
+
+Extends the v1.5.0 section-cut subpackage with the **shell kernel**
+and an optional **bounding polygon** on the cut plane. Section cuts
+through models that mix beams and shells now produce a single
+combined resultant; cuts through analyses where the recorded
+selection sets don't pre-filter to a structural sub-region can be
+narrowed via a convex polygon on the cut plane.
+
+### Added
+
+- **Shell section-cut kernel** — `compute_shell_cut` integrates
+  `section.force` (8 components per IP — `Fxx, Fyy, Fxy, Mxx, Myy,
+  Mxy, Vxz, Vyz`) along the chord at which the cut plane crosses
+  each shell midsurface. 2-point Gauss-Legendre line quadrature
+  along the chord, bilinear sampling between IPs for `ASDShellQ4`,
+  linear sampling for `ASDShellT3`. Rotates element-local traction
+  to global via `cdata.rotation_matrix(eid)`. Layered-shell
+  variants are transparent (`section.force` is already through-
+  thickness-integrated regardless of layer count).
+- **Shared-edge resolution** — when a cut plane lands exactly on
+  the shared edge between two adjacent shells, `find_shell_intersections`
+  applies a side-aware geometric filter: only the shell whose interior
+  lies on the **discarded** side contributes. Avoids the double-count
+  that the naive geometry pipeline produced on cuts at mesh-row
+  elevations (verified on Test_NLShell's z=870 T3/Q4 interface).
+- **Bounding polygon on the cut plane** — `SectionCutSpec` gains an
+  optional `bounding_polygon=` field, a convex polygon on the cut
+  plane restricting the cut to elements whose intersection falls
+  inside it. Validation at construction rejects off-plane vertices,
+  degenerate polygons, fewer than three vertices, and non-convex
+  shapes. Threaded through `MPCODataSet.section_cut(...,
+  bounding_polygon=...)`.
+- **`SectionCut.compute` composition** — runs the beam and shell
+  kernels in one pass, shares a `PolygonClipper` so the plane basis
+  isn't recomputed, and aggregates `(F, M)` about a mixed centroid
+  (mean of beam intersection points and shell chord midpoints). New
+  `shell_intersections`, `per_shell_F`, `per_shell_M_at_midpoint`
+  fields on the result; `contributing_element_ids` walks both
+  kernels.
+
+### Added (internal)
+
+- `STKO_to_python.cuts.geometry` — plane-basis projection,
+  shoelace-signed-area, inward-edge-normal computation, Cyrus-Beck
+  segment clipping, point-in-polygon test, and `PolygonClipper` (a
+  pre-built struct of plane basis + 2-D polygon for reuse across
+  the kernels). All testable without an `.mpco` fixture.
+- `STKO_to_python.cuts.kernels.shell` — `SHELL_ELEMENT_CLASSES`
+  registry, `ShellIntersection` record, `find_shell_intersections`,
+  `compute_shell_cut`, `ShellCutResult`. Internal helpers cover
+  bilinear quad-IP / linear tri-IP sampling, inverse shape-function
+  maps for ASDShellQ4 (Newton on a planar 2-D embedding) and
+  ASDShellT3, midsurface-normal computation, and cut-normal
+  orientation that resolves both normal cuts and edge-coincident
+  cuts.
+
+### Test coverage
+
+- `tests/unit/cuts/test_geometry.py` — 30 tests for plane-basis
+  orthonormality, batch projection, signed-area and convexity
+  predicates, inward-edge-normal orientation (CCW + CW), point-in-
+  polygon with edge / vertex / exterior cases, and Cyrus-Beck
+  clipping covering segment-through-polygon, fully-inside, fully-
+  outside, starting-inside, parallel-to-edge, and grazing-edge
+  geometries. End-to-end `PolygonClipper` smoke on horizontal and
+  oblique planes.
+- `tests/unit/cuts/test_shell_kernel.py` — 29 tests split into
+  pure-math (bilinear/linear sampling weight identities, inverse
+  shape-function helpers, `_sample_shell_section_force` recovers
+  IP values at the IP coords) and real-fixture
+  (`Test_NLShell`) groups. Real-fixture coverage exercises the
+  registry, the geometry phase, end-to-end consistency (`Newton's
+  3rd law` residual = 0 at z=2500 across all three model stages),
+  side-flip equivalence, and the shared-edge side-aware filter at
+  z=870 (positive matches just-below T3, negative matches just-
+  above Q4, no double-count).
+- `tests/unit/cuts/test_bounding_polygon.py` — 10 integration
+  tests: half-plate beam cut returns half the gravity force
+  (5000 → 2500 against the `elasticFrame_mesh_displacementBased`
+  fixture), shell chord clipping at the polygon boundary on
+  `Test_NLShell`, empty-polygon edge cases, the `ds.section_cut(...,
+  bounding_polygon=...)` inline form, and the rejection rule that
+  bans mixing `spec=` with inline kwargs.
+- `tests/unit/cuts/test_specs.py` gains 11 tests covering the
+  `bounding_polygon` validation contract (≥3 vertices, on-plane
+  within tol, non-degenerate area, convex), `ndarray` coercion,
+  CW polygon acceptance, hash / equality semantics, and pickle
+  round-trip.
+
 ### Documentation
 
 - `docs/MPCODataSet.md` gains a "Resource management" section showing
@@ -30,7 +120,7 @@ spelled out in [`CLAUDE.md`](CLAUDE.md#versioning-policy):
   instead of the historical "Phase 0 stub" placeholder. Class-level
   context-manager-support paragraph rewritten accordingly.
 
-### Added (internal)
+### Added (internal — bench)
 
 - `bench/test_construction_bench.py` — three new pytest-benchmark
   cases isolating `MPCODataSet.__init__` from the first fetch:
@@ -44,6 +134,17 @@ spelled out in [`CLAUDE.md`](CLAUDE.md#versioning-policy):
   per-partition incremental cost (~3 ms) is now a recorded data
   point so future refactors that change construction can be
   evaluated against a known reference.
+
+### Out of scope (v2.0 candidates)
+
+- Solid (continuum) section-cut kernel — surface integration over
+  the polygon clipped from each crossing element's volume.
+- Non-convex `bounding_polygon` — would need general clipping
+  (Sutherland-Hodgman) instead of the convex-only Cyrus-Beck.
+- Bounding half-spaces (combine multiple planes) as an alternative
+  to a polygon.
+- Per-layer / per-fiber breakdown of shell cuts via
+  `material.fiber.stress`.
 
 ---
 
