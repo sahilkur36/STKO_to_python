@@ -57,7 +57,7 @@ class ElementResultsQueryEngine(BaseResultsQueryEngine):
             or selection_set_id is not None
             or selection_set_name is not None
         ):
-            resolved_ids = self._resolver.resolve_elements(
+            resolved_ids = self._dataset._selection_resolver.resolve_elements(
                 names=selection_set_name,
                 ids=selection_set_id,
                 explicit_ids=element_ids,

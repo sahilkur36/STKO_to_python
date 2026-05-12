@@ -58,7 +58,7 @@ class NodalResultsQueryEngine(BaseResultsQueryEngine):
         """
         manager = self._dataset.nodes
 
-        resolved_ids = self._resolver.resolve_nodes(
+        resolved_ids = self._dataset._selection_resolver.resolve_nodes(
             names=selection_set_name,
             ids=selection_set_id,
             explicit_ids=node_ids,

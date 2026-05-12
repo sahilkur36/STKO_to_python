@@ -27,12 +27,11 @@ def _make_engine(selection_set: dict | None = None, cache_size: int = 32):
     dataset = MagicMock()
     dataset.nodes = manager
     dataset.model_stages = ("MODEL_STAGE[0]",)
-    resolver = SelectionSetResolver(selection_set or {})
+    dataset._selection_resolver = SelectionSetResolver(selection_set or {})
     engine = NodalResultsQueryEngine(
         dataset=dataset,
         pool=MagicMock(),
         policy=MagicMock(),
-        resolver=resolver,
         cache_size=cache_size,
     )
     return engine, manager, dataset

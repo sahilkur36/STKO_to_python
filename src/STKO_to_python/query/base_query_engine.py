@@ -42,7 +42,6 @@ if TYPE_CHECKING:
     from ..core.dataset import MPCODataSet
     from ..io.partition_pool import Hdf5PartitionPool
     from ..io.format_policy import MpcoFormatPolicy
-    from ..selection.resolver import SelectionSetResolver
 
 logger = logging.getLogger(__name__)
 
@@ -59,24 +58,30 @@ class BaseResultsQueryEngine(ABC):
     ----------
     dataset:
         Parent ``MPCODataSet`` instance. Held by reference; the engine
-        does not own it. Used only to read already-built attributes
-        (e.g. ``dataset.model_stages``) — no HDF5 access via dataset.
+        does not own it. Used to read already-built attributes (e.g.
+        ``dataset.model_stages``) and the lazy
+        ``dataset._selection_resolver`` at query time — no HDF5 access
+        via dataset.
     pool:
         Shared :class:`Hdf5PartitionPool` for HDF5 handle reuse.
     policy:
         :class:`MpcoFormatPolicy` for path templates.
-    resolver:
-        :class:`SelectionSetResolver` for name/id → id-array resolution.
     cache_size:
         LRU capacity for fetch-result caching. ``0`` disables caching.
         Default is :data:`DEFAULT_CACHE_SIZE` (32).
+
+    Notes
+    -----
+    The selection resolver is *not* a constructor argument — concrete
+    engines reach into ``dataset._selection_resolver`` inside
+    :meth:`fetch`. This keeps the dataset's ``@cached_property`` lazy:
+    constructing the engine no longer forces the ``.cdata`` parse.
     """
 
     __slots__ = (
         "_dataset",
         "_pool",
         "_policy",
-        "_resolver",
         "_cache_size",
         "_result_cache",
         "_step_axis_cache",
@@ -90,7 +95,6 @@ class BaseResultsQueryEngine(ABC):
         dataset: "MPCODataSet",
         pool: "Hdf5PartitionPool",
         policy: "MpcoFormatPolicy",
-        resolver: "SelectionSetResolver",
         cache_size: int = DEFAULT_CACHE_SIZE,
     ) -> None:
         if cache_size < 0:
@@ -98,7 +102,6 @@ class BaseResultsQueryEngine(ABC):
         self._dataset = dataset
         self._pool = pool
         self._policy = policy
-        self._resolver = resolver
         self._cache_size = int(cache_size)
         self._result_cache: "OrderedDict[Hashable, pd.DataFrame]" = OrderedDict()
         self._step_axis_cache: dict[str, pd.Index] = {}

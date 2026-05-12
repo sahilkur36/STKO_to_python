@@ -2,8 +2,8 @@
 
 Uses a minimal concrete subclass because the base is abstract. No real
 ``.mpco`` fixture — everything is exercised through fake HDF5 datasets
-(numpy arrays quacking like ``h5py.Dataset``) and a ``SelectionSetResolver``
-built from a plain dict.
+(numpy arrays quacking like ``h5py.Dataset``); selection resolution is
+not in the base's surface, so no resolver wiring is needed here.
 """
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ import pandas as pd
 import pytest
 
 from STKO_to_python.query import BaseResultsQueryEngine
-from STKO_to_python.selection import SelectionSetResolver
 
 
 class _ConcreteEngine(BaseResultsQueryEngine):
@@ -27,12 +26,10 @@ class _ConcreteEngine(BaseResultsQueryEngine):
 
 
 def _make_engine(cache_size: int = 32) -> _ConcreteEngine:
-    resolver = SelectionSetResolver({})
     return _ConcreteEngine(
         dataset=object(),          # engine only holds the ref
         pool=object(),             # not exercised in these tests
         policy=object(),
-        resolver=resolver,
         cache_size=cache_size,
     )
 
@@ -43,7 +40,7 @@ def _make_engine(cache_size: int = 32) -> _ConcreteEngine:
 def test_abstract_base_cannot_be_instantiated():
     with pytest.raises(TypeError):
         BaseResultsQueryEngine(  # type: ignore[abstract]
-            dataset=None, pool=None, policy=None, resolver=None,
+            dataset=None, pool=None, policy=None,
         )
 
 
@@ -51,7 +48,7 @@ def test_cache_size_negative_rejected():
     with pytest.raises(ValueError, match="cache_size must be >= 0"):
         _ConcreteEngine(
             dataset=object(), pool=object(), policy=object(),
-            resolver=SelectionSetResolver({}), cache_size=-1,
+            cache_size=-1,
         )
 
 
