@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+from functools import cached_property
 from pathlib import Path
 from typing import Dict, Optional, Tuple, Any
 
@@ -239,32 +240,54 @@ class MPCODataSet:
         # Extract the model steps information
         self.number_of_steps=self.model_info._get_number_of_steps()
         
-        # Get the selection set mapping (This is the only place cdata is used)
-        self.selection_set=self.cdata._extract_selection_set_ids()
+        # ``selection_set`` and ``_selection_resolver`` are exposed as
+        # ``@cached_property`` below; they trigger the .cdata parse on
+        # first access. ``print_summary`` (called only when verbose) and
+        # the lazy property on the dataset are the two entry points.
 
-        # Phase 2: centralized resolver (side-by-side with legacy per-manager
-        # helpers; consumers will switch over in a later phase).
-        self._selection_resolver = SelectionSetResolver(self.selection_set)
-
-        # Phase 2.8: query engines (side-by-side; managers remain the public
-        # entry point, the engines add caching and will own the read logic
-        # in a later phase).
+        # Phase 2.8: query engines. Eagerly constructed but read the
+        # dataset's lazy resolver at query time — so dataset construction
+        # no longer pays the .cdata parse unless something needs it.
         self._nodal_query_engine = NodalResultsQueryEngine(
             dataset=self,
             pool=self._pool,
             policy=self._format_policy,
-            resolver=self._selection_resolver,
         )
         self._element_query_engine = ElementResultsQueryEngine(
             dataset=self,
             pool=self._pool,
             policy=self._format_policy,
-            resolver=self._selection_resolver,
         )
 
         if self.verbose:
             self.print_summary()
-        
+
+    @cached_property
+    def selection_set(self) -> Dict[int, dict]:
+        """``{set_id -> {"SET_NAME", "NODES", "ELEMENTS"}}`` from .cdata.
+
+        Parsed lazily on first access via
+        :meth:`CDataReader._extract_selection_set_ids`. The .cdata files
+        can be large (95k+ lines on real models), so dataset construction
+        used to pay this cost unconditionally; making it lazy means
+        callers that never touch selection-set logic skip the parse.
+
+        The cached dict is returned by-reference — mutating it corrupts
+        every subsequent access. Treat as read-only.
+        """
+        return self.cdata._extract_selection_set_ids()
+
+    @cached_property
+    def _selection_resolver(self) -> "SelectionSetResolver":
+        """Centralized name/id → id-array resolver, lazy on selection_set.
+
+        First access triggers the .cdata parse via :attr:`selection_set`,
+        then builds the resolver. The query engines pull from this
+        property at query time, so the resolver is built only when a
+        fetch actually needs it.
+        """
+        return SelectionSetResolver(self.selection_set)
+
     def print_summary(self):
         """
         Emit a summary of the virtual dataset at INFO level on the

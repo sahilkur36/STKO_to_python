@@ -12,7 +12,27 @@ spelled out in [`CLAUDE.md`](CLAUDE.md#versioning-policy):
 
 ## [Unreleased]
 
-_Nothing pending._
+### Changed (internal)
+
+- `MPCODataSet.selection_set` and `MPCODataSet._selection_resolver` are
+  now lazy `@cached_property` attributes. Dataset construction no
+  longer parses the `.cdata` selection-set blocks; the parse triggers
+  on first access. Workflows that only fetch element results without
+  passing `selection_set_*` arguments now skip the cdata parse
+  entirely.
+- `NodalResultsQueryEngine` and `ElementResultsQueryEngine` no longer
+  take `resolver=` in their constructor; they read
+  `dataset._selection_resolver` at query time. Internal refactor —
+  the public managers (`Nodes.get_nodal_results`,
+  `Elements.get_element_results`) behave identically.
+
+### Test coverage
+
+- Added two regression guards under
+  `tests/unit/selection/test_dataset_resolver_integration.py`:
+  - `selection_set` / `_selection_resolver` are absent from
+    `ds.__dict__` immediately after construction.
+  - Repeat access returns the same cached object.
 
 ---
 

@@ -58,7 +58,6 @@ def test_elastic_frame_engine_parity_and_cache(elastic_frame_dir: Path):
         dataset=ds,
         pool=ds._pool,
         policy=ds._format_policy,
-        resolver=ds._selection_resolver,
     )
     nr1 = engine.fetch(
         results_name="DISPLACEMENT",
@@ -93,7 +92,6 @@ def test_elastic_frame_element_engine_parity_and_cache(elastic_frame_dir: Path):
         dataset=ds,
         pool=ds._pool,
         policy=ds._format_policy,
-        resolver=ds._selection_resolver,
     )
     er1 = engine.fetch(
         "force",
