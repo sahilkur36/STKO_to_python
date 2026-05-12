@@ -292,6 +292,103 @@ class MPCODataSet:
         """
         return SelectionSetResolver(self.selection_set)
 
+    def section_cut(
+        self,
+        *,
+        plane=None,
+        spec=None,
+        model_stage: str,
+        selection_set_name=None,
+        selection_set_id=None,
+        element_ids=None,
+        side: str = "positive",
+        label=None,
+        name=None,
+    ):
+        """Compute a section cut against this dataset.
+
+        Two calling forms:
+
+        - **Inline** (one-shot): pass ``plane`` plus any of the filter
+          kwargs.
+        - **Spec-driven** (reusable): pass a pre-built
+          :class:`~STKO_to_python.cuts.SectionCutSpec` via ``spec``.
+          ``plane`` and the filter kwargs must be omitted in that case.
+
+        Returns a :class:`~STKO_to_python.cuts.SectionCut` carrying the
+        ``(F, M)`` resultant time series, intersection records, and the
+        validator methods (:meth:`SectionCut.consistency_check`,
+        :meth:`SectionCut.compare_to`).
+        """
+        from ..cuts.section_cut import SectionCut
+        from ..cuts.specs import SectionCutSpec
+
+        if spec is not None:
+            if any(
+                v is not None
+                for v in (plane, selection_set_name, selection_set_id, element_ids, label, name)
+            ) or side != "positive":
+                raise ValueError(
+                    "When 'spec' is provided, pass it alone — the inline "
+                    "kwargs (plane/selection_set_*/element_ids/side/label/name) "
+                    "must be omitted."
+                )
+            if not isinstance(spec, SectionCutSpec):
+                raise TypeError(
+                    f"spec must be a SectionCutSpec, got {type(spec).__name__}."
+                )
+            return SectionCut.compute(spec, self, model_stage=model_stage)
+
+        if plane is None:
+            raise ValueError(
+                "Provide either 'plane' (inline form) or 'spec' (reusable form)."
+            )
+        new_spec = SectionCutSpec(
+            plane=plane,
+            selection_set_name=selection_set_name,
+            selection_set_id=selection_set_id,
+            element_ids=element_ids,
+            side=side,
+            label=label,
+            name=name,
+        )
+        return SectionCut.compute(new_spec, self, model_stage=model_stage)
+
+    def section_sweep(
+        self,
+        *,
+        planes,
+        model_stage: str,
+        selection_set_name=None,
+        selection_set_id=None,
+        element_ids=None,
+        side: str = "positive",
+        label=None,
+    ):
+        """Compute a sweep of section cuts at parallel planes.
+
+        Same filter, many planes — the typical "story shear vs
+        elevation" or "depth profile" pattern. Returns a
+        :class:`~STKO_to_python.cuts.SectionSweep` with
+        :meth:`SectionSweep.envelope` and a ``.plot`` namespace for
+        profiles and heatmaps.
+
+        For per-plane filters, build the specs yourself and use
+        :meth:`SectionSweep.from_specs`.
+        """
+        from ..cuts.sweep import SectionSweep
+
+        return SectionSweep.compute(
+            planes,
+            self,
+            model_stage=model_stage,
+            selection_set_name=selection_set_name,
+            selection_set_id=selection_set_id,
+            element_ids=element_ids,
+            side=side,
+            label=label,
+        )
+
     def print_summary(self):
         """
         Emit a summary of the virtual dataset at INFO level on the

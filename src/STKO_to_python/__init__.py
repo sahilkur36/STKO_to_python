@@ -36,6 +36,8 @@ from .results.nodal_results_plotting import NodalResultsPlotter
 from .MPCOList import MPCOResults
 from .MPCOList import MPCO_df
 
+from .cuts import DriftSpec, MultiCutResult, Plane, SectionCut, SectionCutSpec, SectionSweep
+
 __all__ = [
     "MPCODataSet",
     "HDF5Utils",
@@ -59,5 +61,11 @@ __all__ = [
     "NodalResults",
     "NodalResultsPlotter",
     "MPCOResults",
-    "MPCO_df"
+    "MPCO_df",
+    "Plane",
+    "SectionCut",
+    "SectionCutSpec",
+    "SectionSweep",
+    "MultiCutResult",
+    "DriftSpec",
 ]

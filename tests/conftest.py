@@ -62,6 +62,9 @@ def _resolve_examples_dir(repo_root: Path) -> Path:
 EXAMPLES_DIR = _resolve_examples_dir(REPO_ROOT)
 ELASTIC_FRAME_DIR = EXAMPLES_DIR / "elasticFrame" / "results"
 QUAD_FRAME_DIR = EXAMPLES_DIR / "elasticFrame" / "QuadFrame_results"
+ELASTIC_FRAME_DISPBASED_DIR = (
+    EXAMPLES_DIR / "elasticFrame" / "elasticFrame_mesh_displacementBased_results"
+)
 SOLID_PARTITION_DIR = EXAMPLES_DIR / "solid_partition_example"
 NL_SHELL_DIR = EXAMPLES_DIR / "Test_NLShell"
 DISP_BEAM_COL_DIR = EXAMPLES_DIR / "dispBeamCol"
@@ -98,6 +101,25 @@ def elastic_frame_dir() -> Path:
     if not (ELASTIC_FRAME_DIR / "results.mpco").exists():
         pytest.skip(f"elasticFrame example not available at {ELASTIC_FRAME_DIR}")
     return ELASTIC_FRAME_DIR
+
+
+@pytest.fixture(scope="session")
+def elastic_frame_dispbased_dir() -> Path:
+    """Directory for the meshed displacement-based variant of the elastic
+    portal (``elasticFrame_mesh_displacementBased_results``).
+
+    Same portal geometry as ``elasticFrame`` but each beam/column is
+    meshed into multiple ``dispBeamColumn`` elements with Lobatto 5-point
+    integration, recording ``section.force`` at every IP. This is the
+    smallest fixture that exercises the line-station ``section.force``
+    path with non-trivial interpolation between IPs.
+    """
+    if not (ELASTIC_FRAME_DISPBASED_DIR / "results.mpco").exists():
+        pytest.skip(
+            f"elasticFrame displacement-based mesh not available at "
+            f"{ELASTIC_FRAME_DISPBASED_DIR}"
+        )
+    return ELASTIC_FRAME_DISPBASED_DIR
 
 
 @pytest.fixture(scope="session")
