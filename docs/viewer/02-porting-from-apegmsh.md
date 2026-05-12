@@ -174,19 +174,29 @@ These are the "wouldn't reinvent" tricks. Carry them across with care
 ## 7. Overlap audit with v1.8.0 work
 
 We've already shipped section cuts and per-layer/per-fiber shell views.
-Before porting the apeGmsh equivalents, **diff what exists**:
+Before porting the apeGmsh equivalents, **diff what exists**.
+
+The beam-local-frame row was audited at the start of Phase 1; the
+finding is captured below. The other rows are still on the "audit before
+porting" list and will be settled when their respective layers land.
 
 | Topic | STKO_to_python today | apeGmsh equivalent | Action |
 |---|---|---|---|
 | Section cuts (math) | `cuts/kernels/{beam,shell,solid}.py` | none (apeGmsh has only an interactive clipping plane; no resultant integration) | **Keep STKO's** — apeGmsh's clipping is a viz feature, not an integration kernel. |
 | Section cuts (interactive plane) | none | `viewers/core/clipping_controller.py` | **Port apeGmsh's** — wrap STKO's `Plane` so the GUI exposes it. |
-| Per-layer shell views | shipped in v1.8.0 | `viewers/diagrams/_layer_stack.py` | **Audit + reconcile.** Likely keep STKO's data model + lift apeGmsh's aggregation tactics. |
-| Per-fiber views | shipped in v1.8.0 | `viewers/diagrams/_fiber_section.py` | **Audit + reconcile.** Likely keep STKO's data model + lift apeGmsh's 3D-cloud + 2D-side-panel UI pattern. |
-| Beam local frame | `cuts/kernels/beam.py` | `viewers/diagrams/_beam_geometry.py` | **Pick one** — port one canonical implementation into `viewer/math/beam_frame.py` and have both `cuts/` and viewer code consume it. |
+| Per-layer shell views | shipped in v1.8.0 | `viewers/diagrams/_layer_stack.py` | **Audit + reconcile** before Phase 3. Likely keep STKO's data model + lift apeGmsh's aggregation tactics. |
+| Per-fiber views | shipped in v1.8.0 | `viewers/diagrams/_fiber_section.py` | **Audit + reconcile** before Phase 3. Likely keep STKO's data model + lift apeGmsh's 3D-cloud + 2D-side-panel UI pattern. |
+| Beam local frame | `model/transforms.py` + `CDataReader.rotation_matrix` (quaternion from STKO `.cdata` `*LOCAL_AXES`) | `viewers/diagrams/_beam_geometry.py` (vecxz Gram-Schmidt from endpoint coords) | **STKO's wins** — the quaternion is the exact frame OpenSees used during analysis; apeGmsh's reconstructs it. Port apeGmsh's `compute_local_axes` to `viewer/math/beam_frame.py` as a **fallback** for datasets without `.cdata` and for unit tests. Fill-axis policy (`COMPONENT_TO_LOCAL_AXIS`, `fill_axis_for`, `resolve_fill_direction`) is rendering policy, not geometry — defer to Phase 3's `DiagramLayer`. |
 
-**This audit is a precondition for Phase 1 wrap-up.** It's a few hours
-of reading, not a separate phase, but skip it and we end up with two
-parallel implementations of the same physics.
+**Note on `cuts/kernels/beam.py`:** earlier drafts of this table listed
+that module as the local-frame counterpart to port from apeGmsh. The
+audit found it is unrelated — `cuts/kernels/beam.py` solves
+**plane–segment intersection** geometry for section cuts, not local-frame
+math. Different problem; nothing to reconcile.
+
+**This audit is a precondition for each porting PR.** It's a few hours
+of reading per topic, not a separate phase, but skip it and we end up
+with two parallel implementations of the same physics.
 
 ---
 
