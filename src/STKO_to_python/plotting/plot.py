@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Optional, Sequence, Tuple, Union
 import numpy as np
 import matplotlib.pyplot as plt
 
+from .beam_solid import plot_beam_solids
 from .deformed_shape import plot_deformed_shape, plot_undeformed_shape
 from .mesh import plot_mesh, plot_mesh_with_contour
 
@@ -253,6 +254,66 @@ class Plot:
             axes=axes,
             title=title,
             **scatter_kwargs,
+        )
+
+
+    # ------------------------------------------------------------------ #
+    # 3D beam-solid visualization
+    # ------------------------------------------------------------------ #
+
+    def beam_solids(
+        self,
+        *,
+        element_ids: Union[int, Sequence[int], np.ndarray, None] = None,
+        selection_set_id: Union[int, Sequence[int], None] = None,
+        selection_set_name: Union[str, Sequence[str], None] = None,
+        ax: Any = None,
+        face_color: Any = "C0",
+        edge_color: Optional[Any] = "0.25",
+        linewidth: float = 0.6,
+        alpha: float = 0.85,
+        title: Optional[str] = None,
+    ) -> Tuple[Any, dict]:
+        """Render beam elements as 3D extruded section solids.
+
+        Walks the cdata sidecar's ``beam_profile_assignments`` to build
+        an extruded triangle mesh per beam element, then draws the
+        combined mesh as a single
+        :class:`~mpl_toolkits.mplot3d.art3d.Poly3DCollection`. When
+        ``edge_color`` is set (default), the section perimeter at both
+        ends and the sweep longitudinals are overlaid as a
+        :class:`~mpl_toolkits.mplot3d.art3d.Line3DCollection` — interior
+        triangulation edges are intentionally not drawn.
+
+        See :func:`STKO_to_python.plotting.beam_solid.plot_beam_solids`
+        for the full parameter list. ``meta`` carries ``element_count``,
+        ``triangle_count``, ``skipped_elements``, ``profile_ids``, and
+        ``is_3d``.
+
+        Examples
+        --------
+        Render every beam in the model::
+
+            ax, meta = ds.plot.beam_solids()
+
+        Limit to a selection set and skip the structural-edge overlay::
+
+            ax, meta = ds.plot.beam_solids(
+                selection_set_name="Columns",
+                edge_color=None,
+            )
+        """
+        return plot_beam_solids(
+            self._dataset,
+            element_ids=element_ids,
+            selection_set_id=selection_set_id,
+            selection_set_name=selection_set_name,
+            ax=ax,
+            face_color=face_color,
+            edge_color=edge_color,
+            linewidth=linewidth,
+            alpha=alpha,
+            title=title,
         )
 
 
