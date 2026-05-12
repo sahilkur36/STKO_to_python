@@ -80,6 +80,7 @@ nav:
   - Architecture: architecture.md
   - MPCO format conventions: mpco_format_conventions.md
   - Design spec (historical): architecture-refactor-proposal.md
+  - Viewer refactor (design directive): viewer-refactor-directives.md
   - API reference:
       - Overview: api/index.md
       - MPCODataSet: api/mpco-dataset.md
