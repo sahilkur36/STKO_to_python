@@ -21,6 +21,8 @@ workflows the library is built around. Each tutorial:
 | 8 | [Rotate beam-local forces to global](08-rotate-beam-forces-to-global.md) | `elasticFrame/elasticFrame_mesh_results` | `5-ElasticBeam3d` |
 | 9 | [Render beams as 3D extruded solids](09-render-beam-solids.md) | `elasticFrame/QuadFrame_results` | `5-ElasticBeam3d` (+ shell backdrop) |
 | 10 | [Section cuts through frames with shells](10-section-cut-shells.md) | `Test_NLShell` (gitignored — skip-if-absent) | `203-ASDShellQ4` + `204-ASDShellT3` |
+| 11 | [Section cuts through brick continua](11-section-cut-solids.md) | `solid_partition_example` (gitignored — skip-if-absent) | `56-Brick` + `64-DispBeamColumn3d` |
+| 12 | [Per-layer & per-fiber decomposition of layered-shell cuts](12-section-cut-layered-shells.md) | `Test_NLShell` (gitignored — skip-if-absent) | `LayeredShell 15/16` on `ASDShellQ4` + `ASDShellT3` |
 
 For broader tours of the API on a single fixture see the
 [Examples](../examples/usage_tour.md) section. For the reference
