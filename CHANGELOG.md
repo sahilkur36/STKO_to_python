@@ -104,6 +104,21 @@ narrowed via a convex polygon on the cut plane.
 
 ### Documentation
 
+- New cookbook recipe
+  [10 — Section cuts through frames with shells](docs/cookbook/10-section-cut-shells.md)
+  walks through the v1.6.0 surface end-to-end: single-elevation cut,
+  `consistency_check` + `compare_to` validators, a `SectionSweep` for
+  story-shear-vs-elevation profiles, a `bounding_polygon` clip
+  restricting the cut to the left half of the wall, spec-driven
+  reuse + pickle, and the shared-edge behavior with a note on
+  consistency at load-discontinuity elevations.
+- New API reference page
+  [Section cuts API](docs/api/section-cuts.md) covers the public
+  surface (`Plane`, `SectionCutSpec`, `SectionCut`, `SectionSweep`,
+  `MultiCutResult`, `DriftSpec`), the dataset entry points, the
+  v1.6.0 additions (shell kernel, shared-edge resolution, bounding
+  polygon), and pulls full mkdocstrings autodoc per class. Wired
+  into the nav under "API reference → Section cuts".
 - `docs/MPCODataSet.md` gains a "Resource management" section showing
   the `with MPCODataSet(...) as ds:` pattern, when it's worth reaching
   for, and how `ds.clear_result_caches()` fits as a finer-grained
