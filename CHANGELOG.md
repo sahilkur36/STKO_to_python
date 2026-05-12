@@ -12,7 +12,20 @@ spelled out in [`CLAUDE.md`](CLAUDE.md#versioning-policy):
 
 ## [Unreleased]
 
-_Nothing pending._
+### Added (internal)
+
+- `bench/test_construction_bench.py` — three new pytest-benchmark
+  cases isolating `MPCODataSet.__init__` from the first fetch:
+  single-partition construction, multi-partition construction (via
+  the QuadFrame fixture), and first `selection_set` access (which
+  triggers the lazy .cdata parse). Fills the spec §6 Phase 5 gap
+  where dataset construction was previously bundled into
+  `test_bench_fetch_cold`.
+- `bench/README.md` documents the v1.5.0 baseline numbers and a
+  table mapping each bench to the spec §6 target it sits under. The
+  per-partition incremental cost (~3 ms) is now a recorded data
+  point so future refactors that change construction can be
+  evaluated against a known reference.
 
 ---
 
