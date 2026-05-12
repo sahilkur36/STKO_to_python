@@ -1,6 +1,13 @@
 # Viewer Refactor — Directives
 
-**Status:** brainstorm / design directive. Not a plan yet.
+**Status:** conceptual model — locked. The implementation plan now lives
+under [`docs/viewer/`](viewer/00-roadmap.md):
+
+- [Roadmap](viewer/00-roadmap.md) — phased delivery, semver targets, definition of done per phase.
+- [Architecture](viewer/01-architecture.md) — renderer-agnostic layering, `Backend` protocol, three deployment targets.
+- [Porting from apeGmsh](viewer/02-porting-from-apegmsh.md) — file-by-file lift plan with adaptation notes.
+- [Deployment targets](viewer/03-deployment-targets.md) — local Qt, headless CLI, VNC, Trame web, SSH-cluster guidance.
+
 **Goal:** define the conceptual model for the next-generation STKO_to_python
 viewer so an implementation plan can hang off concrete contracts.
 **Scope:** post-processing only — we render what's in `.mpco`, never edit the model.
