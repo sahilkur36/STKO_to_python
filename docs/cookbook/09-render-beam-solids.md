@@ -101,7 +101,46 @@ that pass behind them.
 
 ---
 
-## 4. Per-element profile vs. uniform section
+## 4. Render the deformed configuration
+
+`ds.plot.beam_solids_deformed(model_stage, step, scale)` is the
+deformed twin of `beam_solids`. It fetches `DISPLACEMENT` at the
+requested step, shifts every end node by `scale * disp`, and feeds
+those into the same extrusion pipeline. `meta` carries `model_stage`,
+`step`, and `scale` on top of the standard keys.
+
+```python
+ax, meta = ds.plot.beam_solids_deformed(
+    model_stage="MODEL_STAGE[2]",
+    step=9,
+    scale=2000.0,
+    face_color="C3",
+)
+```
+
+Two things to know:
+
+1. **Pick a scale that makes sense for your model.** Elastic frames
+   under service-load levels produce displacements that are orders of
+   magnitude smaller than member lengths — at true-to-life scale, the
+   deformation is invisible. The default in literature is 50-1000×;
+   the fixture used here needs ~2000× because the imposed load is
+   very small.
+2. **The cross-section's local frame is taken from the *undeformed*
+   `*LOCAL_AXES` quaternion.** STKO does not record a deformed local
+   frame, so we cannot rotate the section with the deformed tangent.
+   Translations look correct; large rotations on slender members may
+   show a slightly off section orientation. For visualization this is
+   acceptable; for downstream geometry export, use the undeformed
+   render plus a custom transform.
+
+`scale=0` collapses to the undeformed configuration without fetching
+DISPLACEMENT — useful for code paths that toggle deformed/undeformed
+behind a flag.
+
+---
+
+## 5. Per-element profile vs. uniform section
 
 STKO supports variable cross-section through
 `*BEAM_PROFILE_ASSIGNMENT` entries with weight pairs. **This release
@@ -135,13 +174,14 @@ viewer.
 
 ## Variations
 
-- **Render the deformed solid** — wait for PR 2C; the deformed
-  variant feeds the same kernel with `node + scale * displacement`
-  instead of the original nodal coords.
 - **Color beams by force** — fetch element results, build a per-element
   scalar, normalize, and pass `face_color` as an array; the
   `Poly3DCollection` accepts a colormap-compatible value array via
   `set_array`.
+- **Animate a pushover** — call `beam_solids_deformed` in a loop over
+  step indices and use `matplotlib.animation.FuncAnimation` to drive
+  the timeline. Hold the axes fixed (don't reset between frames) so
+  the camera stays steady.
 - **Export to STL** — `vertices` and `faces` from
   `extrude_beam_geometry` are the canonical STL inputs; concatenate
   the per-element batches with a vertex offset and write with

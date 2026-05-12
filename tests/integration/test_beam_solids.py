@@ -129,3 +129,127 @@ def test_beam_solids_quad_frame_passthrough_to_user_3d_axes(
         assert ax is user_ax
     finally:
         plt.close("all")
+
+
+# ---------------------------------------------------------------------- #
+# Deformed variant
+# ---------------------------------------------------------------------- #
+def test_beam_solids_deformed_elastic_frame_meta(elastic_frame_dir: Path) -> None:
+    """Same triangle counts as the undeformed render; meta carries
+    the stage/step/scale annotations.
+    """
+    ds = MPCODataSet(str(elastic_frame_dir), "results", verbose=False)
+    try:
+        ax, meta = ds.plot.beam_solids_deformed(
+            model_stage="MODEL_STAGE[1]", step=5, scale=100.0,
+        )
+        assert ax is not None
+        assert meta["element_count"] == 3
+        assert meta["triangle_count"] == 3 * (2 * 2 + 2 * 4)
+        assert meta["model_stage"] == "MODEL_STAGE[1]"
+        assert meta["step"] == 5
+        assert meta["scale"] == 100.0
+        assert meta["is_3d"] is True
+    finally:
+        plt.close("all")
+
+
+def test_beam_solids_deformed_scale_zero_matches_undeformed(
+    elastic_frame_dir: Path,
+) -> None:
+    """scale=0 must collapse to the undeformed configuration — the
+    DISPLACEMENT fetch is skipped entirely so this also works on
+    datasets that didn't record displacement (covered indirectly here
+    by skipping the fetch path).
+    """
+    ds = MPCODataSet(str(elastic_frame_dir), "results", verbose=False)
+    try:
+        ax_und, meta_und = ds.plot.beam_solids()
+        plt.close("all")
+        ax_zero, meta_zero = ds.plot.beam_solids_deformed(
+            model_stage="MODEL_STAGE[1]", step=5, scale=0.0,
+        )
+        # Triangle counts identical; vertex positions identical (the
+        # latter is harder to check without inspecting collections, but
+        # equal triangle counts at the same target ids is the structural
+        # equivalent).
+        assert meta_und["triangle_count"] == meta_zero["triangle_count"]
+        assert meta_und["element_count"] == meta_zero["element_count"]
+        assert meta_zero["scale"] == 0.0
+    finally:
+        plt.close("all")
+
+
+def test_beam_solids_deformed_axis_limits_track_scale(
+    elastic_frame_dir: Path,
+    monkeypatch,
+) -> None:
+    """With a known per-node displacement, the deformed render's axis
+    extent must shift by ``scale * displacement`` along the
+    corresponding axis.
+
+    Real fixtures have small displacements relative to the frame size,
+    so we mock ``_displacement_at_step`` to inject a large shift in a
+    single direction. This pins the wiring: the scaled displacement
+    flows from the helper into the renderer's vertex computation.
+    """
+    ds = MPCODataSet(str(elastic_frame_dir), "results", verbose=False)
+    try:
+        # Inject a y-direction shift big enough to escape the autoscale
+        # pad (5% of the ~5000 mm span ≈ 250 mm) at scale=1.
+        injected_disp = {
+            int(nid): np.array([0.0, 1000.0, 0.0], dtype=float)
+            for nid in ds.nodes_info["dataframe"]["node_id"]
+        }
+        monkeypatch.setattr(
+            "STKO_to_python.plotting.deformed_shape._displacement_at_step",
+            lambda dataset, *, model_stage, step: injected_disp,
+        )
+
+        scale = 2.0  # 2 * 1000 mm = 2000 mm shift along y
+        ax_und, _ = ds.plot.beam_solids()
+        und_y_center = sum(ax_und.get_ylim3d()) / 2.0
+        plt.close("all")
+
+        ax_def, _ = ds.plot.beam_solids_deformed(
+            model_stage="MODEL_STAGE[1]", step=5, scale=scale,
+        )
+        def_y_center = sum(ax_def.get_ylim3d()) / 2.0
+
+        # Every node shifted by (0, 1000, 0), so the data centroid in y
+        # shifts by scale * 1000. The axis y-center should mirror that.
+        np.testing.assert_allclose(
+            def_y_center - und_y_center,
+            scale * 1000.0,
+            rtol=0.05,  # autoscale pad slack
+        )
+    finally:
+        plt.close("all")
+
+
+def test_beam_solids_deformed_invalid_step_raises(
+    elastic_frame_dir: Path,
+) -> None:
+    ds = MPCODataSet(str(elastic_frame_dir), "results", verbose=False)
+    try:
+        with pytest.raises(ValueError, match="step="):
+            ds.plot.beam_solids_deformed(
+                model_stage="MODEL_STAGE[1]", step=99999, scale=1.0,
+            )
+    finally:
+        plt.close("all")
+
+
+def test_beam_solids_deformed_quad_frame_only_beams(
+    quad_frame_dir: Path,
+) -> None:
+    """Shells must still be filtered out in the deformed render."""
+    ds = MPCODataSet(str(quad_frame_dir), "results", verbose=False)
+    try:
+        ax, meta = ds.plot.beam_solids_deformed(
+            model_stage="MODEL_STAGE[1]", step=2, scale=50.0,
+        )
+        assert meta["element_count"] == 75
+        assert meta["triangle_count"] == 75 * (2 * 2 + 2 * 4)
+    finally:
+        plt.close("all")

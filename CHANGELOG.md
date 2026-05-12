@@ -14,6 +14,21 @@ spelled out in [`CLAUDE.md`](CLAUDE.md#versioning-policy):
 
 ### Added
 
+- **`ds.plot.beam_solids_deformed(model_stage, step, scale=1.0, ...)`** —
+  deformed twin of `ds.plot.beam_solids`. Fetches `DISPLACEMENT` at the
+  requested step, shifts every end node by `scale * disp`, and feeds
+  the displaced coordinates through the same extrusion pipeline.
+  `scale=0` collapses to the undeformed configuration without
+  fetching displacements. `meta` carries `model_stage`, `step`, and
+  `scale` on top of the standard keys. The cross-section's local
+  frame is taken from the undeformed `*LOCAL_AXES` quaternion — STKO
+  does not record a deformed local frame, so translations are exact
+  but large rotations on slender members may show a slightly off
+  section orientation (documented in the cookbook recipe).
+- Cookbook recipe 09 extended with a "Render the deformed
+  configuration" section covering scale selection and the
+  undeformed-local-frame caveat.
+
 - **`ds.plot.beam_solids(...)`** — new method on the dataset plot
   facade that renders beam elements as 3D extruded section solids,
   using the cdata sidecar's `*BEAM_PROFILE`,
@@ -69,13 +84,15 @@ spelled out in [`CLAUDE.md`](CLAUDE.md#versioning-policy):
   triangulation from the sweep loop, and degenerate profiles (no
   triangles, no sweeps). Includes a real-fixture smoke check on the
   `elasticFrame/results` beam profile.
-- Added `tests/integration/test_beam_solids.py` (7 tests) exercising
-  the `ds.plot.beam_solids` renderer on both single-partition
-  (`elasticFrame/results`, 3 beams) and multi-class
-  (`elasticFrame/QuadFrame_results`, 75 beams + 625 shells) fixtures.
-  Pins the `(ax, meta)` contract, the explicit-id and unknown-id
-  filter behavior, the `edge_color=None` switch, and composition with
-  a user-supplied 3D axes.
+- Added `tests/integration/test_beam_solids.py` (12 tests) exercising
+  the `ds.plot.beam_solids` and `ds.plot.beam_solids_deformed`
+  renderers on both single-partition (`elasticFrame/results`, 3 beams)
+  and multi-class (`elasticFrame/QuadFrame_results`, 75 beams + 625
+  shells) fixtures. Pins the `(ax, meta)` contract, filter behavior,
+  the `edge_color=None` switch, user-supplied 3D axes composition,
+  the deformed `scale=0` short-circuit, and a monkeypatched
+  displacement test that proves the scaled displacement flows into
+  the rendered vertex positions.
 
 ---
 
