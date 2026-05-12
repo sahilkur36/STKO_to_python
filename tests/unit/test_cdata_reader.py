@@ -696,3 +696,109 @@ def test_selection_set_parses_with_all_ids_on_one_line(tmp_path) -> None:
     reader = _make_reader(tmp_path, text)
     sets = reader._extract_selection_set_ids()
     assert sets[2]["NODES"] == list(range(1, 16))
+
+
+# ---------------------------------------------------------------------- #
+# CDataReader.rotation_matrix / .rotation_matrices                       #
+# ---------------------------------------------------------------------- #
+
+def test_rotation_matrix_identity_quaternion(tmp_path) -> None:
+    text = "*LOCAL_AXES\n42 1 0 0 0\n"
+    reader = _make_reader(tmp_path, text)
+    R = reader.rotation_matrix(42)
+    np.testing.assert_allclose(R, np.eye(3), atol=1e-12)
+
+
+def test_rotation_matrix_unknown_element_raises(tmp_path) -> None:
+    reader = _make_reader(tmp_path, "*LOCAL_AXES\n1 1 0 0 0\n")
+    with pytest.raises(KeyError, match=r"Element 999 has no"):
+        reader.rotation_matrix(999)
+
+
+def test_rotation_matrices_returns_aligned_ids_and_matrices(tmp_path) -> None:
+    text = (
+        "*LOCAL_AXES\n"
+        "1 1 0 0 0\n"      # identity
+        "5 0 1 0 0\n"      # 180° about X
+        "9 0 0 1 0\n"      # 180° about Y
+    )
+    reader = _make_reader(tmp_path, text)
+    ids, R = reader.rotation_matrices()
+    assert ids.tolist() == [1, 5, 9]
+    assert R.shape == (3, 3, 3)
+    np.testing.assert_allclose(R[0], np.eye(3), atol=1e-12)
+    np.testing.assert_allclose(R[1], np.diag([1.0, -1.0, -1.0]), atol=1e-12)
+    np.testing.assert_allclose(R[2], np.diag([-1.0, 1.0, -1.0]), atol=1e-12)
+
+
+def test_rotation_matrices_subset_in_caller_order(tmp_path) -> None:
+    """Caller-specified ids preserve their order in the returned arrays."""
+    text = (
+        "*LOCAL_AXES\n"
+        "1 1 0 0 0\n"
+        "2 1 0 0 0\n"
+        "3 1 0 0 0\n"
+    )
+    reader = _make_reader(tmp_path, text)
+    ids, R = reader.rotation_matrices(element_ids=[3, 1])
+    assert ids.tolist() == [3, 1]
+    assert R.shape == (2, 3, 3)
+
+
+def test_rotation_matrices_missing_ids_raise_with_preview(tmp_path) -> None:
+    reader = _make_reader(tmp_path, "*LOCAL_AXES\n1 1 0 0 0\n")
+    with pytest.raises(KeyError, match="100, 200"):
+        reader.rotation_matrices(element_ids=[1, 100, 200])
+
+
+def test_rotation_matrices_empty_when_no_local_axes(tmp_path) -> None:
+    reader = _make_reader(tmp_path, "#nothing here\n")
+    ids, R = reader.rotation_matrices()
+    assert ids.shape == (0,)
+    assert R.shape == (0, 3, 3)
+
+
+def test_rotation_round_trip_against_global_force_recorder() -> None:
+    """End-to-end: rotating ``localForce`` with R must match ``force``
+    (which OpenSees emits in global) on the bundled elasticFrame fixture.
+
+    Exercises every layer — cdata parsing, the rotation_matrix helper,
+    and the actual ElasticBeam3d force output. Tolerance is set to the
+    machine-precision level the normalization step achieves.
+    """
+    import os.path
+    here = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    fixture = os.path.join(
+        here, "stko_results_examples", "elasticFrame",
+        "elasticFrame_mesh_results",
+    )
+    if not os.path.isdir(fixture):
+        pytest.skip("elasticFrame fixture not present in this checkout")
+
+    from STKO_to_python import MPCODataSet
+    ds = MPCODataSet(fixture, "results", verbose=False)
+
+    # Element 1 is a column (q non-trivial); 7 is a beam (identity q).
+    # Both must round-trip exactly.
+    for eid in (1, 7):
+        er_global = ds.elements.get_element_results(
+            results_name="force", element_type="5-ElasticBeam3d",
+            model_stage="MODEL_STAGE[1]", element_ids=[eid],
+        )
+        er_local = ds.elements.get_element_results(
+            results_name="localForce", element_type="5-ElasticBeam3d",
+            model_stage="MODEL_STAGE[1]", element_ids=[eid],
+        )
+        R = ds.cdata.rotation_matrix(eid)
+
+        # 12 cols per step: Fx_1, Fy_1, Fz_1, Mx_1, My_1, Mz_1, Fx_2, ...
+        g = er_global.df.values
+        l = er_local.df.values
+        # Apply R to each of the 4 (force_n1, moment_n1, force_n2, moment_n2)
+        # 3-vectors per row.
+        rotated = np.empty_like(l)
+        for k in range(4):
+            cols = slice(3 * k, 3 * (k + 1))
+            rotated[:, cols] = l[:, cols] @ R.T
+
+        np.testing.assert_allclose(rotated, g, atol=1e-7)

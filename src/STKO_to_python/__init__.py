@@ -11,6 +11,7 @@ from .elements.selector import ElementSelector
 from .elements.result_mask import ResultMask
 from .model.model_info_reader import ModelInfoReader
 from .model.cdata_reader import BeamProfile, CDataReader, ElementInfo
+from .model.transforms import quaternion_to_rotation_matrix
 
 from .plotting.plot import Plot
 from .plotting.plot_settings import PlotSettings
@@ -42,6 +43,7 @@ __all__ = [
     "CData",
     "ElementInfo",
     "BeamProfile",
+    "quaternion_to_rotation_matrix",
     "Nodes",
     "Elements",
     "ElementResults",

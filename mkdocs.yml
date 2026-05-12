@@ -106,6 +106,7 @@ nav:
       - Element selector + mask pipeline: cookbook/05-selector-and-mask-pipeline.md
       - Node selector + mask pipeline: cookbook/06-node-selector-and-mask-pipeline.md
       - Select by STKO geometry and property name: cookbook/07-select-by-geometry-and-property.md
+      - Rotate beam-local forces to global: cookbook/08-rotate-beam-forces-to-global.md
   - Examples:
       - Usage tour: examples/usage_tour.md
       - Elastic frame: examples/elastic_frame.md
