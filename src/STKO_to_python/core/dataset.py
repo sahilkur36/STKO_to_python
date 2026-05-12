@@ -57,9 +57,13 @@ class MPCODataSet:
     Context-manager support
     -----------------------
     ``MPCODataSet`` supports the ``with`` statement. ``__enter__`` returns
-    the dataset; ``__exit__`` is a no-op today but will close pooled HDF5
-    handles once the partition pool lands in Phase 1 of the refactor.
-    Existing code that does not use ``with`` keeps working unchanged.
+    the dataset; ``__exit__`` closes every pooled HDF5 handle via
+    :meth:`Hdf5PartitionPool.close_all` and drops the nodal / element
+    query-engine LRU caches. Use ``with`` for scripts that open many
+    datasets in sequence or that need a deterministic teardown before
+    another process rewrites the ``.mpco`` files. Notebooks that hold a
+    long-lived dataset can keep using the bare-constructor form;
+    existing code that does not use ``with`` keeps working unchanged.
 
     Upon initialization, this class automatically loads directory information,
     extracts partitions, model stages, results names, and other essential dataset
@@ -399,19 +403,27 @@ class MPCODataSet:
     def __enter__(self) -> "MPCODataSet":
         """Enter the runtime context; returns ``self``.
 
-        Phase 0 stub: no resources are held yet. When the partition pool
-        lands in Phase 1, ``__exit__`` will close pooled HDF5 handles.
+        Pairs with :meth:`__exit__` so that ``with MPCODataSet(...) as
+        ds:`` deterministically closes pooled HDF5 handles and drops
+        cached results at scope exit. Notebooks that hold a long-lived
+        dataset can keep using the bare-constructor form; the context
+        manager is most useful in scripts that open many datasets in
+        sequence or that need a clean teardown before another process
+        rewrites the ``.mpco`` files.
         """
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         """Exit the runtime context.
 
-        Closes every handle held by the partition pool. Safe to call
-        even when ``pool_size=0`` (the legacy default) — the pool holds
-        no handles in that configuration, so ``close_all()`` is a no-op.
-        Returning ``None`` (implicitly) means exceptions raised inside
-        the ``with`` block propagate unchanged.
+        Closes every handle held by the partition pool and drops the
+        nodal / element query-engine LRU caches (which may hold
+        DataFrames keyed on HDF5 reads that are now stale). Safe to
+        call even when ``pool_size=0`` (the open-per-query mode) —
+        the pool holds no handles in that configuration, so
+        ``close_all()`` is a no-op. Returning ``None`` (implicitly)
+        means exceptions raised inside the ``with`` block propagate
+        unchanged.
         """
         pool = getattr(self, "_pool", None)
         if pool is not None:

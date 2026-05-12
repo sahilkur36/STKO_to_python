@@ -12,6 +12,24 @@ spelled out in [`CLAUDE.md`](CLAUDE.md#versioning-policy):
 
 ## [Unreleased]
 
+### Documentation
+
+- `docs/MPCODataSet.md` gains a "Resource management" section showing
+  the `with MPCODataSet(...) as ds:` pattern, when it's worth reaching
+  for, and how `ds.clear_result_caches()` fits as a finer-grained
+  alternative. The context-manager feature already existed (since the
+  partition-pool work in v1.4.x) but wasn't surfaced anywhere users
+  would notice it.
+- `examples/usage_tour.py` gains a new section 15 demonstrating the
+  context-manager form end-to-end with cache-clearing observable
+  through `_nodal_query_engine.cached_result_count` before and after
+  `__exit__`. Runs against the elasticFrame fixture; no behavior
+  change.
+- `__enter__` / `__exit__` docstrings on `MPCODataSet` updated to
+  describe what they do today (close pool + drop engine caches)
+  instead of the historical "Phase 0 stub" placeholder. Class-level
+  context-manager-support paragraph rewritten accordingly.
+
 ### Added (internal)
 
 - `bench/test_construction_bench.py` — three new pytest-benchmark

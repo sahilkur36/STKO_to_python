@@ -267,6 +267,58 @@ nr = ds.nodes.get_nodal_results(
 
 Name resolution is case-insensitive. If a name is ambiguous (matches multiple IDs), an error is raised suggesting you use the ID instead.
 
+## Resource management
+
+`MPCODataSet` supports the `with` statement. `__enter__` returns the
+dataset; `__exit__` closes every pooled HDF5 handle and drops the
+nodal / element query-engine LRU caches. Existing code that does not
+use `with` keeps working unchanged — the constructor still opens
+files lazily through the partition pool — but the explicit form is
+useful when you need a deterministic teardown.
+
+```python
+from STKO_to_python import MPCODataSet
+
+with MPCODataSet(r"C:\results\building", "mpco", name="Building") as ds:
+    nr = ds.nodes.get_nodal_results(
+        results_name="DISPLACEMENT",
+        selection_set_name="ControlPoints",
+    )
+    nr.save_pickle("disp.pkl")
+# ds is now closed: partition handles released, engine caches cleared.
+```
+
+When to reach for `with`:
+
+- **Batch scripts that open many datasets in sequence.** Each `ds` is
+  scoped to its iteration; HDF5 handles aren't kept open across the
+  whole run.
+- **Pipelines that hand off the .mpco files to another process.**
+  Closing the partition pool before that process rewrites the file
+  avoids reading a stale view on the next open.
+- **Memory-tight environments.** The query-engine LRU keeps up to 32
+  result frames per engine; releasing them at scope exit reclaims
+  memory promptly.
+
+For finer-grained control without tearing down the dataset, call
+`ds.clear_result_caches()` directly — it drops only the engine
+caches, leaving the partition pool open for the next query:
+
+```python
+ds = MPCODataSet(r"C:\results\building", "mpco")
+nr = ds.nodes.get_nodal_results(...)
+# ... heavy aggregation work ...
+ds.clear_result_caches()   # free the cached DataFrames
+# ... continue using ds ...
+```
+
+Long-lived notebook sessions typically don't need `with` — the
+process exits eventually and the OS reclaims everything. The
+performance bench shows that opening + closing the partition pool
+costs a few ms per partition, so wrapping every cell in `with` would
+add overhead with no benefit. Use it where the resource-management
+semantics matter.
+
 ## Notes
 
 - The dataset uses a composition pattern: `ds.nodes`, `ds.elements`, `ds.model_info`, `ds.cdata`, `ds.plot`, and `ds.info` are internal components. The public API is through `ds.nodes.get_nodal_results()` and `ds.elements.get_element_results()`.
