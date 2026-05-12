@@ -12,6 +12,16 @@ spelled out in [`CLAUDE.md`](CLAUDE.md#versioning-policy):
 
 ## [Unreleased]
 
+### Added (internal)
+
+- `STKO_to_python.plotting.beam_solid.extrude_beam_geometry(...)` —
+  pure-numpy helper that sweeps a `BeamProfile` between two beam
+  endpoints (with optional `*SECTION_OFFSET`) and returns
+  `(vertices, faces)` as a 3D triangle mesh. Foundation for the
+  upcoming `ds.plot.beam_solids` rendering wrapper; the geometry
+  function is matplotlib-free so it can be unit-tested without a
+  display backend.
+
 ### Changed (internal)
 
 - `MPCODataSet.selection_set` and `MPCODataSet._selection_resolver` are
@@ -33,6 +43,12 @@ spelled out in [`CLAUDE.md`](CLAUDE.md#versioning-policy):
   - `selection_set` / `_selection_resolver` are absent from
     `ds.__dict__` immediately after construction.
   - Repeat access returns the same cached object.
+- Added `tests/unit/test_beam_extrude.py` (13 tests) covering the
+  geometry-helper contract: vertex placement under identity / rotated
+  frames, section-offset translation, cap winding, side-surface
+  triangulation from the sweep loop, and degenerate profiles (no
+  triangles, no sweeps). Includes a real-fixture smoke check on the
+  `elasticFrame/results` beam profile.
 
 ---
 
