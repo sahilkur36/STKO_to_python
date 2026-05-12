@@ -304,6 +304,7 @@ class MPCODataSet:
         side: str = "positive",
         label=None,
         name=None,
+        bounding_polygon=None,
     ):
         """Compute a section cut against this dataset.
 
@@ -315,6 +316,12 @@ class MPCODataSet:
           :class:`~STKO_to_python.cuts.SectionCutSpec` via ``spec``.
           ``plane`` and the filter kwargs must be omitted in that case.
 
+        ``bounding_polygon`` (inline form only) is an optional convex
+        polygon on the cut plane that restricts the cut to the region
+        inside it — handy when the recorded selection sets don't
+        pre-filter to a structural sub-region. See
+        :class:`SectionCutSpec` for the validation rules.
+
         Returns a :class:`~STKO_to_python.cuts.SectionCut` carrying the
         ``(F, M)`` resultant time series, intersection records, and the
         validator methods (:meth:`SectionCut.consistency_check`,
@@ -324,14 +331,25 @@ class MPCODataSet:
         from ..cuts.specs import SectionCutSpec
 
         if spec is not None:
-            if any(
-                v is not None
-                for v in (plane, selection_set_name, selection_set_id, element_ids, label, name)
-            ) or side != "positive":
+            if (
+                any(
+                    v is not None
+                    for v in (
+                        plane,
+                        selection_set_name,
+                        selection_set_id,
+                        element_ids,
+                        label,
+                        name,
+                        bounding_polygon,
+                    )
+                )
+                or side != "positive"
+            ):
                 raise ValueError(
                     "When 'spec' is provided, pass it alone — the inline "
-                    "kwargs (plane/selection_set_*/element_ids/side/label/name) "
-                    "must be omitted."
+                    "kwargs (plane/selection_set_*/element_ids/side/label/"
+                    "name/bounding_polygon) must be omitted."
                 )
             if not isinstance(spec, SectionCutSpec):
                 raise TypeError(
@@ -351,6 +369,7 @@ class MPCODataSet:
             side=side,
             label=label,
             name=name,
+            bounding_polygon=bounding_polygon,
         )
         return SectionCut.compute(new_spec, self, model_stage=model_stage)
 
@@ -373,7 +392,9 @@ class MPCODataSet:
         :meth:`SectionSweep.envelope` and a ``.plot`` namespace for
         profiles and heatmaps.
 
-        For per-plane filters, build the specs yourself and use
+        For per-plane filters or per-plane ``bounding_polygon``s (the
+        polygon must lie on each plane, so it's spec-bound rather than
+        sweep-bound), build the specs yourself and pass them to
         :meth:`SectionSweep.from_specs`.
         """
         from ..cuts.sweep import SectionSweep

@@ -38,6 +38,7 @@ import pandas as pd
 
 from .kernels.beam import BeamIntersection
 from .kernels.beam_resultant import compute_beam_cut
+from .kernels.shell import ShellIntersection, compute_shell_cut
 from .specs import SectionCutSpec
 
 if TYPE_CHECKING:
@@ -84,6 +85,9 @@ class SectionCut:
     intersections: tuple[BeamIntersection, ...]
     per_beam_F: dict[int, np.ndarray] = field(default_factory=dict)
     per_beam_M_at_intersection: dict[int, np.ndarray] = field(default_factory=dict)
+    shell_intersections: tuple[ShellIntersection, ...] = ()
+    per_shell_F: dict[int, np.ndarray] = field(default_factory=dict)
+    per_shell_M_at_midpoint: dict[int, np.ndarray] = field(default_factory=dict)
 
     # ------------------------------------------------------------------ #
     # Construction
@@ -98,20 +102,86 @@ class SectionCut:
     ) -> "SectionCut":
         """Compute the cut against ``dataset`` at ``model_stage``.
 
-        Dispatches to the beam kernel today; the shell and solid kernels
-        will compose into this same return type as they land.
+        Composes the beam and shell kernels and aggregates ``(F, M)``
+        about a shared centroid (the mean of all reference points —
+        beam intersection points and shell chord midpoints). The solid
+        kernel will plug into the same composition in v2.0.
         """
-        beam = compute_beam_cut(dataset, spec, model_stage=model_stage)
+        # Share one PolygonClipper between the two kernels so the plane
+        # basis isn't recomputed twice when bounding_polygon is set.
+        clipper = None
+        if spec.bounding_polygon is not None:
+            from .geometry import prepare_clipper
+            clipper = prepare_clipper(spec.plane, spec.bounding_polygon)
+
+        beam = compute_beam_cut(
+            dataset, spec, model_stage=model_stage, clipper=clipper,
+        )
+        shell = compute_shell_cut(
+            dataset, spec, model_stage=model_stage, clipper=clipper,
+        )
+
+        # Pick a time axis from whichever kernel found something. Beam
+        # and shell readers route through the same broker, so when both
+        # have intersections their time arrays are identical by
+        # construction.
+        if not beam.is_empty:
+            time = beam.time
+        elif not shell.is_empty:
+            time = shell.time
+        else:
+            return cls(
+                spec=spec,
+                model_stage=model_stage,
+                F=np.zeros((0, 3)),
+                M=np.zeros((0, 3)),
+                time=np.zeros((0,)),
+                centroid=np.zeros(3),
+                intersections=(),
+                per_beam_F={},
+                per_beam_M_at_intersection={},
+                shell_intersections=(),
+                per_shell_F={},
+                per_shell_M_at_midpoint={},
+            )
+
+        # Aggregate F + M about the shared centroid of every reference
+        # point in both kernels.
+        ref_points = []
+        for b in beam.intersections:
+            ref_points.append(b.point_arr)
+        for s in shell.intersections:
+            ref_points.append(s.chord_midpoint)
+        centroid = np.mean(np.stack(ref_points, axis=0), axis=0)
+
+        F_total = np.zeros((time.shape[0], 3), dtype=float)
+        M_total = np.zeros_like(F_total)
+        for ix in beam.intersections:
+            Fi = beam.per_beam_F[ix.element_id]
+            Mi = beam.per_beam_M_at_intersection[ix.element_id]
+            arm = ix.point_arr - centroid
+            F_total += Fi
+            M_total += Mi + np.cross(arm, Fi)
+        for ix in shell.intersections:
+            Fi = shell.per_shell_F[ix.element_id]
+            Mi = shell.per_shell_M_at_midpoint[ix.element_id]
+            arm = ix.chord_midpoint - centroid
+            F_total += Fi
+            M_total += Mi + np.cross(arm, Fi)
+
         return cls(
             spec=spec,
             model_stage=model_stage,
-            F=beam.F,
-            M=beam.M,
-            time=beam.time,
-            centroid=beam.centroid,
+            F=F_total,
+            M=M_total,
+            time=time,
+            centroid=centroid,
             intersections=beam.intersections,
             per_beam_F=dict(beam.per_beam_F),
             per_beam_M_at_intersection=dict(beam.per_beam_M_at_intersection),
+            shell_intersections=shell.intersections,
+            per_shell_F=dict(shell.per_shell_F),
+            per_shell_M_at_midpoint=dict(shell.per_shell_M_at_midpoint),
         )
 
     # ------------------------------------------------------------------ #
@@ -136,17 +206,25 @@ class SectionCut:
 
     @property
     def is_empty(self) -> bool:
-        return len(self.intersections) == 0
+        return (
+            len(self.intersections) == 0
+            and len(self.shell_intersections) == 0
+        )
 
     @property
     def contributing_element_ids(self) -> tuple[int, ...]:
-        return tuple(ix.element_id for ix in self.intersections)
+        """All element ids whose contribution the cut sums up — beams
+        first, then shells, each block sorted by element_id."""
+        beam_ids = [ix.element_id for ix in self.intersections]
+        shell_ids = [ix.element_id for ix in self.shell_intersections]
+        return tuple(beam_ids + shell_ids)
 
     def __repr__(self) -> str:
         label = f", label={self.spec.label!r}" if self.spec.label else ""
+        n_total = len(self.intersections) + len(self.shell_intersections)
         return (
             f"SectionCut(stage={self.model_stage!r}, n_steps={self.n_steps}, "
-            f"n_intersections={len(self.intersections)}, "
+            f"n_intersections={n_total}, "
             f"side={self.spec.side!r}{label})"
         )
 

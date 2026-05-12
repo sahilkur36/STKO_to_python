@@ -11,6 +11,13 @@ from __future__ import annotations
 
 from .beam import BEAM_ELEMENT_CLASSES, BeamIntersection, find_beam_intersections
 from .beam_resultant import BeamCutResult, compute_beam_cut
+from .shell import (
+    SHELL_ELEMENT_CLASSES,
+    ShellCutResult,
+    ShellIntersection,
+    compute_shell_cut,
+    find_shell_intersections,
+)
 
 __all__ = [
     "BEAM_ELEMENT_CLASSES",
@@ -18,4 +25,9 @@ __all__ = [
     "find_beam_intersections",
     "BeamCutResult",
     "compute_beam_cut",
+    "SHELL_ELEMENT_CLASSES",
+    "ShellIntersection",
+    "find_shell_intersections",
+    "ShellCutResult",
+    "compute_shell_cut",
 ]

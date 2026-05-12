@@ -92,6 +92,97 @@ class TestSectionCutSpecValidation:
             SectionCutSpec(plane=PLANE, element_ids=("a", "b"))  # type: ignore[arg-type]
 
 
+class TestSectionCutSpecBoundingPolygon:
+    """``bounding_polygon`` was added in v1.6.0; these tests guard the
+    validation contract documented in :class:`SectionCutSpec`."""
+
+    def test_basic_square_polygon_accepted(self):
+        # z = 3 horizontal plane; polygon on it.
+        square = ((0, 0, 3), (1, 0, 3), (1, 1, 3), (0, 1, 3))
+        spec = SectionCutSpec(plane=PLANE, element_ids=(1,), bounding_polygon=square)
+        # Coerced to tuple of float-triples for hashability.
+        assert spec.bounding_polygon == (
+            (0.0, 0.0, 3.0), (1.0, 0.0, 3.0),
+            (1.0, 1.0, 3.0), (0.0, 1.0, 3.0),
+        )
+
+    def test_polygon_accepts_ndarray(self):
+        poly = np.array([[0, 0, 3], [1, 0, 3], [0.5, 1, 3]], dtype=float)
+        spec = SectionCutSpec(plane=PLANE, element_ids=(1,), bounding_polygon=poly)
+        assert spec.bounding_polygon == (
+            (0.0, 0.0, 3.0), (1.0, 0.0, 3.0), (0.5, 1.0, 3.0),
+        )
+
+    def test_too_few_vertices_raises(self):
+        with pytest.raises(ValueError, match="at least 3 vertices"):
+            SectionCutSpec(
+                plane=PLANE, element_ids=(1,),
+                bounding_polygon=((0, 0, 3), (1, 0, 3)),
+            )
+
+    def test_off_plane_vertex_raises(self):
+        with pytest.raises(ValueError, match="on the cut plane"):
+            SectionCutSpec(
+                plane=PLANE, element_ids=(1,),
+                bounding_polygon=((0, 0, 3), (1, 0, 3.5), (0.5, 1, 3)),
+            )
+
+    def test_collinear_polygon_raises(self):
+        # Three collinear points have zero planar area.
+        with pytest.raises(ValueError, match="degenerate"):
+            SectionCutSpec(
+                plane=PLANE, element_ids=(1,),
+                bounding_polygon=((0, 0, 3), (1, 1, 3), (2, 2, 3)),
+            )
+
+    def test_non_convex_polygon_raises(self):
+        # 4-vertex "arrowhead" / dart that's concave at the third vertex.
+        dart = ((0, 0, 3), (2, 0, 3), (1, 0.5, 3), (1, 2, 3))
+        with pytest.raises(ValueError, match="convex"):
+            SectionCutSpec(
+                plane=PLANE, element_ids=(1,),
+                bounding_polygon=dart,
+            )
+
+    def test_bad_shape_raises(self):
+        with pytest.raises(ValueError, match=r"\(M, 3\)|triples"):
+            SectionCutSpec(
+                plane=PLANE, element_ids=(1,),
+                bounding_polygon=((0, 0), (1, 0), (0, 1)),  # length-2 vertices
+            )
+
+    def test_cw_polygon_accepted(self):
+        # Reverse a CCW polygon — convexity check is sign-agnostic.
+        cw_square = ((0, 0, 3), (0, 1, 3), (1, 1, 3), (1, 0, 3))
+        spec = SectionCutSpec(plane=PLANE, element_ids=(1,), bounding_polygon=cw_square)
+        assert len(spec.bounding_polygon) == 4
+
+    def test_polygon_persists_through_hash(self):
+        a = SectionCutSpec(plane=PLANE, element_ids=(1,),
+                           bounding_polygon=((0, 0, 3), (1, 0, 3), (0, 1, 3)))
+        b = SectionCutSpec(plane=PLANE, element_ids=(1,),
+                           bounding_polygon=((0, 0, 3), (1, 0, 3), (0, 1, 3)))
+        assert hash(a) == hash(b)
+        assert a == b
+
+    def test_polygon_inequality_when_vertices_differ(self):
+        a = SectionCutSpec(plane=PLANE, element_ids=(1,),
+                           bounding_polygon=((0, 0, 3), (1, 0, 3), (0, 1, 3)))
+        b = SectionCutSpec(plane=PLANE, element_ids=(1,),
+                           bounding_polygon=((0, 0, 3), (2, 0, 3), (0, 2, 3)))
+        assert a != b
+
+    def test_polygon_pickle_roundtrip(self, tmp_path):
+        spec = SectionCutSpec(
+            plane=PLANE, element_ids=(1,),
+            bounding_polygon=((0, 0, 3), (1, 0, 3), (1, 1, 3), (0, 1, 3)),
+        )
+        path = spec.save_pickle(tmp_path / "spec.pkl")
+        restored = SectionCutSpec.load_pickle(path)
+        assert restored == spec
+        assert restored.bounding_polygon == spec.bounding_polygon
+
+
 class TestSectionCutSpecSignedNormal:
     def test_positive_side_returns_plane_normal(self):
         spec = SectionCutSpec(plane=PLANE, element_ids=(1,), side="positive")
