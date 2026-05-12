@@ -39,6 +39,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from ...model.layered_section_reader import LayerInfo
+
 if TYPE_CHECKING:
     from ..specs import SectionCutSpec
     from ..geometry import PolygonClipper
@@ -722,6 +724,633 @@ def _shell_cut_per_element(
         M_local[:, 0] += weight * m_per_unit_x
         M_local[:, 1] += weight * m_per_unit_y
         # m_per_unit_z is identically zero — skip.
+
+    F_global = F_local @ R.T
+    M_global = M_local @ R.T
+    return F_global, M_global
+
+
+# ---------------------------------------------------------------------- #
+# Per-layer breakdown (v1.7)
+# ---------------------------------------------------------------------- #
+#
+# A layered shell's ``section.fiber.stress`` recorder writes one block
+# per ``(gauss_point × thickness_layer)`` pair. The library's column-name
+# parser flattens those blocks into columns named
+# ``sigma11_l<L>_ip<K>`` (or ``sigma11_f<F>_l<L>_ip<K>`` when there are
+# fibers within a layer). The layer 0 is conventionally the bottom; the
+# top layer is index ``n_layers - 1``.
+#
+# Per-layer math
+# --------------
+# The shell's standard ``section.force`` 8-vector is the through-
+# thickness integral of the layer-wise stress against simple geometry
+# weights:
+#
+#     Fxx = ∫ σ_11 dz  ≈  Σ_k σ_11^(k) · t_k
+#     Mxx = ∫ σ_11 · z dz  ≈  Σ_k σ_11^(k) · t_k · z_offset_k
+#
+# Replacing the standard 8-vector with the kth-layer-only version gives
+# the per-layer contribution to the cut. The rest of the math (chord
+# integration, rotation to global) is identical to
+# :func:`_shell_cut_per_element`.
+
+# Voigt column order used internally by the layered-shell kernel.
+#     0: sigma11   1: sigma22   2: sigma33
+#     3: sigma12   4: sigma23   5: sigma13
+_LAYER_STRESS_SHORTNAMES = ("sigma11", "sigma22", "sigma33", "sigma12", "sigma23", "sigma13")
+
+
+# Layered-shell nDMaterial response — most OpenSees nDMaterials don't
+# tag their stress components with standard codes, so MPCO falls back
+# to ``UnknownStress(n)`` placeholders. The five-component PlateFiber
+# layout is consistent across PlaneStress-wrapped and full PlateFiber
+# materials in the OpenSees source:
+#
+#     UnknownStress     -> sigma11 (in-plane normal x)
+#     UnknownStress(1)  -> sigma22 (in-plane normal y)
+#     UnknownStress(2)  -> sigma12 (in-plane shear)
+#     UnknownStress(3)  -> sigma13 (transverse shear x-z) — often ~0
+#     UnknownStress(4)  -> sigma23 (transverse shear y-z) — often ~0
+#
+# Each tuple entry is ``(column_basename, voigt_position)``.
+_UNKNOWN_STRESS_TO_VOIGT: tuple[tuple[str, int], ...] = (
+    ("UnknownStress", 0),     # sigma11
+    ("UnknownStress(1)", 1),  # sigma22
+    ("UnknownStress(2)", 3),  # sigma12
+    ("UnknownStress(3)", 5),  # sigma13
+    ("UnknownStress(4)", 4),  # sigma23
+)
+
+
+def _layer_column_candidates(
+    layer_idx: int, ip: int, available: set[str],
+) -> list[tuple[str, int]]:
+    """Return ``[(column_name, voigt_position), ...]`` for one
+    (layer, IP) pair.
+
+    Probes the column index in priority order:
+
+    1. Explicit ``sigma11_l<L>_ip<K>`` (per the docs / format
+       conventions §17).
+    2. Explicit ``sigma11_f<L>_ip<K>`` (alternate when MPCO writes the
+       layer axis as a fiber index).
+    3. ``UnknownStress(n)_f<L>_ip<K>`` (fallback for layered shells
+       whose nDMaterial doesn't register response codes — the standard
+       Test_NLShell case).
+
+    Returns only columns that exist in ``available``.
+    """
+    candidates: list[tuple[str, int]] = []
+    # Path 1: explicit sigma<ij>_l<L>_ip<K>.
+    for pos, name in enumerate(_LAYER_STRESS_SHORTNAMES):
+        col = f"{name}_l{layer_idx}_ip{ip}"
+        if col in available:
+            candidates.append((col, pos))
+    if candidates:
+        return candidates
+    # Path 2: explicit sigma<ij>_f<L>_ip<K>.
+    for pos, name in enumerate(_LAYER_STRESS_SHORTNAMES):
+        col = f"{name}_f{layer_idx}_ip{ip}"
+        if col in available:
+            candidates.append((col, pos))
+    if candidates:
+        return candidates
+    # Path 3: UnknownStress(n)_f<L>_ip<K> (the nDMaterial fallback —
+    # most common for Test_NLShell-style layered plate sections).
+    for base, pos in _UNKNOWN_STRESS_TO_VOIGT:
+        col = f"{base}_f{layer_idx}_ip{ip}"
+        if col in available:
+            candidates.append((col, pos))
+    return candidates
+
+
+def _fiber_in_layer_column_candidates(
+    fiber_idx: int, layer_idx: int, ip: int, available: set[str],
+) -> list[tuple[str, int]]:
+    """Return ``[(column_name, voigt_position), ...]`` for one
+    (fiber, layer, IP) triple.
+
+    Probes the column index in priority order:
+
+    1. Explicit ``sigma11_f<F>_l<L>_ip<K>``.
+    2. ``UnknownStress(n)_f<F>_l<L>_ip<K>`` (nDMaterial fallback).
+    """
+    candidates: list[tuple[str, int]] = []
+    # Path 1: explicit sigma<ij>_f<F>_l<L>_ip<K>.
+    for pos, name in enumerate(_LAYER_STRESS_SHORTNAMES):
+        col = f"{name}_f{fiber_idx}_l{layer_idx}_ip{ip}"
+        if col in available:
+            candidates.append((col, pos))
+    if candidates:
+        return candidates
+    # Path 2: UnknownStress(n)_f<F>_l<L>_ip<K>.
+    for base, pos in _UNKNOWN_STRESS_TO_VOIGT:
+        col = f"{base}_f{fiber_idx}_l{layer_idx}_ip{ip}"
+        if col in available:
+            candidates.append((col, pos))
+    return candidates
+
+
+def _read_fiber_in_layer_stress_array(
+    rows, n_ip: int, layer_idx: int, fiber_idx: int,
+) -> np.ndarray:
+    """Extract a ``(n_steps, n_ip, 6)`` Voigt stress array for one
+    fiber within one layer.
+
+    Recognises ``sigma11_f<F>_l<L>_ip<K>`` and
+    ``UnknownStress(n)_f<F>_l<L>_ip<K>``. Missing components default
+    to zero.
+    """
+    n_steps = rows.shape[0]
+    out = np.zeros((n_steps, n_ip, 6), dtype=float)
+    available = set(rows.columns)
+    for k in range(n_ip):
+        for col, pos in _fiber_in_layer_column_candidates(
+            fiber_idx, layer_idx, k, available,
+        ):
+            out[:, k, pos] = rows[col].to_numpy(dtype=float)
+    return out
+
+
+_FIBER_IN_LAYER_RE = re.compile(
+    r"_f(\d+)_l(\d+)_ip(\d+)$"
+)
+
+
+def _discover_fiber_count_in_layer(columns, layer_idx: int) -> int:
+    """Return the number of distinct fibers in ``layer_idx`` by scanning
+    the available column names for ``_f<F>_l<layer_idx>_ip<K>``
+    patterns.
+
+    Returns 0 when no fiber-in-layer columns exist for the requested
+    layer — the caller treats that as "this layer has no fibers" and
+    raises a clear error.
+    """
+    seen: set[int] = set()
+    for c in columns:
+        m = _FIBER_IN_LAYER_RE.search(str(c))
+        if m is None:
+            continue
+        f_idx = int(m.group(1))
+        l_idx = int(m.group(2))
+        if l_idx == int(layer_idx):
+            seen.add(f_idx)
+    return len(seen)
+
+
+def _read_layer_stress_array(
+    rows, n_ip: int, layer_idx: int,
+) -> np.ndarray:
+    """Extract a ``(n_steps, n_ip, 6)`` Voigt stress array for one layer.
+
+    Recognises three column conventions (see
+    :func:`_layer_column_candidates`):
+
+    - ``sigma11_l<L>_ip<K>`` — explicit ``_l<L>_`` layer index with
+      named stress shortnames (per the format-conventions doc).
+    - ``sigma11_f<L>_ip<K>`` — explicit ``_f<L>_`` index when MPCO
+      treats the layer axis as a fiber axis.
+    - ``UnknownStress(n)_f<L>_ip<K>`` — the ``nDMaterial`` fallback
+      with indexed component names. The mapping to Voigt positions
+      follows the PlateFiber convention (σ11, σ22, σ12, σ13, σ23).
+
+    Missing components default to zero — many materials (e.g. rebar
+    uniaxial wrapped into a layer) only carry σ11.
+    """
+    n_steps = rows.shape[0]
+    out = np.zeros((n_steps, n_ip, 6), dtype=float)
+    available = set(rows.columns)
+    for k in range(n_ip):
+        for col, pos in _layer_column_candidates(layer_idx, k, available):
+            out[:, k, pos] = rows[col].to_numpy(dtype=float)
+    return out
+
+
+def _sample_layer_stress(
+    stress: np.ndarray, xi: float, eta: float, base_type: str,
+) -> np.ndarray:
+    """Sample layer Voigt stress at arbitrary ``(ξ, η)`` on the shell.
+
+    Reuses the standard quad/tri interpolation weights. ``stress``
+    shape ``(n_steps, n_ip, 6)`` → returns ``(n_steps, 6)``.
+    """
+    n_ip = stress.shape[1]
+    if n_ip == 4 and "Q4" in base_type:
+        w = _quad_ip_weights(xi, eta)
+    elif n_ip == 3 and "T3" in base_type:
+        w = _tri_ip_weights(xi, eta)
+    elif n_ip == 1:
+        return stress[:, 0, :].copy()
+    elif n_ip == 4:
+        w = _quad_ip_weights(xi, eta)
+    elif n_ip == 3:
+        w = _tri_ip_weights(xi, eta)
+    else:
+        raise NotImplementedError(
+            f"Shell {base_type!r} has {n_ip} layered IPs; only 1/3/4 IPs "
+            "are supported in v1.7."
+        )
+    return np.einsum("sij,i->sj", stress, w)
+
+
+def _resolve_layer_table(
+    dataset: "MPCODataSet", element_id: int,
+):
+    """Look up the layer table for one element.
+
+    Chain: ``cdata.element_info[eid].physical_property_id ->
+    dataset.layered_sections[section_id]``.
+
+    The two side tables are populated from different files
+    (``.cdata`` for the element-info index, ``sections.tcl`` for the
+    layer geometry); a mismatch surfaces here as ``KeyError`` rather
+    than silently producing zero per-layer forces.
+    """
+    info = dataset.cdata.element_info.get(int(element_id))
+    if info is None:
+        raise KeyError(
+            f"Element {element_id} has no *ELEMENT_INFO record in the "
+            f".cdata sidecar. Per-layer cuts require it to resolve the "
+            f"element's physical_property_id."
+        )
+    section_id = int(info.physical_property_id)
+    layers = dataset.layered_sections.get(section_id)
+    if layers is None:
+        raise KeyError(
+            f"Element {element_id}: physical_property_id={section_id} "
+            "does not match any LayeredShell section parsed from "
+            "sections.tcl. Verify that sections.tcl lives beside the "
+            ".mpco recorder output and that the section id matches the "
+            "STKO physical_property_id."
+        )
+    return layers
+
+
+def compute_shell_cut_per_layer(
+    dataset: "MPCODataSet",
+    spec: "SectionCutSpec",
+    *,
+    model_stage: str,
+    layer_idx: int,
+    clipper: "PolygonClipper | None" = None,
+) -> "ShellCutResult":
+    """Compute a per-layer slice of the shell section cut.
+
+    The geometry phase is identical to :func:`compute_shell_cut` — same
+    shells, same chords. The resultant phase replaces
+    ``section.force`` with the layer's own contribution to the section
+    force 8-vector::
+
+        Fxx^(k) = σ_11^(k) · t_k
+        Fyy^(k) = σ_22^(k) · t_k
+        Fxy^(k) = σ_12^(k) · t_k
+        Mxx^(k) = σ_11^(k) · t_k · z_offset_k
+        Myy^(k) = σ_22^(k) · t_k · z_offset_k
+        Mxy^(k) = σ_12^(k) · t_k · z_offset_k
+        Vxz^(k) = σ_13^(k) · t_k
+        Vyz^(k) = σ_23^(k) · t_k
+
+    Summing all per-layer cuts must recover the standard cut to
+    numerical tolerance (verified by
+    :meth:`SectionCut.per_layer_force` and its test).
+
+    Parameters
+    ----------
+    layer_idx : int
+        Layer index from 0 (bottom) to ``n_layers - 1`` (top), matching
+        the ordering in ``sections.tcl``.
+
+    Raises
+    ------
+    KeyError
+        If a contributing shell's section can't be resolved (missing
+        ``*ELEMENT_INFO`` or no ``LayeredShell`` definition for its
+        ``physical_property_id``).
+    """
+    if not isinstance(layer_idx, (int, np.integer)) or int(layer_idx) < 0:
+        raise ValueError(f"layer_idx must be a non-negative int, got {layer_idx!r}.")
+    layer_idx = int(layer_idx)
+
+    intersections = find_shell_intersections(dataset, spec, clipper=clipper)
+
+    by_type: dict[str, list[ShellIntersection]] = {}
+    for ix in intersections:
+        by_type.setdefault(ix.element_type, []).append(ix)
+
+    per_shell_F: dict[int, np.ndarray] = {}
+    per_shell_M_at_mid: dict[int, np.ndarray] = {}
+    time: np.ndarray | None = None
+
+    for elem_type, sub in by_type.items():
+        eids = [ix.element_id for ix in sub]
+        er = dataset.elements.get_element_results(
+            results_name="section.fiber.stress",
+            element_type=elem_type,
+            model_stage=model_stage,
+            element_ids=eids,
+        )
+        n_ip = int(er.n_ip) if er.n_ip > 0 else 0
+        if n_ip == 0:
+            raise ValueError(
+                f"Shell {elem_type!r} has no integration points in the "
+                "section.fiber.stress result. The per-layer cut needs "
+                "stress recorded at each in-plane Gauss point; verify "
+                "the recorder writes section.fiber.stress on this class."
+            )
+        base_type = _strip_class_tag(elem_type)
+        for ix in sub:
+            layers = _resolve_layer_table(dataset, ix.element_id)
+            if layer_idx >= len(layers):
+                raise IndexError(
+                    f"layer_idx={layer_idx} out of range for element "
+                    f"{ix.element_id}: section has {len(layers)} layers."
+                )
+            layer = layers[layer_idx]
+            rows = er.df.xs(ix.element_id, level="element_id")
+            layer_stress = _read_layer_stress_array(rows, n_ip, layer_idx)
+            F, M = _shell_cut_per_element_for_layer(
+                layer_stress, layer, ix, dataset, spec, base_type,
+            )
+            per_shell_F[ix.element_id] = F
+            per_shell_M_at_mid[ix.element_id] = M
+        if time is None:
+            time = np.asarray(er.time, dtype=float)
+
+    if not intersections or time is None:
+        return ShellCutResult(
+            F=np.zeros((0, 3)),
+            M=np.zeros((0, 3)),
+            time=np.zeros((0,)),
+            centroid=np.zeros(3),
+            intersections=(),
+        )
+
+    centroid = np.mean(
+        np.stack([ix.chord_midpoint for ix in intersections], axis=0), axis=0
+    )
+    F_total = np.zeros((time.shape[0], 3), dtype=float)
+    M_total = np.zeros_like(F_total)
+    for ix in intersections:
+        Fi = per_shell_F[ix.element_id]
+        Mi = per_shell_M_at_mid[ix.element_id]
+        arm = ix.chord_midpoint - centroid
+        F_total += Fi
+        M_total += Mi + np.cross(arm, Fi)
+
+    return ShellCutResult(
+        F=F_total,
+        M=M_total,
+        time=time,
+        centroid=centroid,
+        intersections=tuple(intersections),
+        per_shell_F=per_shell_F,
+        per_shell_M_at_midpoint=per_shell_M_at_mid,
+    )
+
+
+def compute_shell_cut_per_fiber(
+    dataset: "MPCODataSet",
+    spec: "SectionCutSpec",
+    *,
+    model_stage: str,
+    layer_idx: int,
+    fiber_idx: int,
+    clipper: "PolygonClipper | None" = None,
+) -> "ShellCutResult":
+    """Compute a per-fiber slice of the shell section cut.
+
+    A layered shell whose layer L is itself a Fiber section produces
+    ``section.fiber.stress`` columns named
+    ``<comp>_f<F>_l<L>_ip<K>``. This kernel reads the F-th fiber's
+    stress within the L-th layer and integrates its contribution to
+    the cut, using the fiber's tributary thickness (defaulted to
+    ``t_layer / n_fibers_in_layer`` for uniform distribution) and its
+    z_offset within the layer.
+
+    Sum-of-fibers identity: summing every fiber's per-fiber cut within
+    a layer recovers that layer's standard per-layer cut, when the
+    fiber distribution is uniform. Layers without fiber decomposition
+    raise — use :func:`compute_shell_cut_per_layer` for those.
+
+    Parameters
+    ----------
+    layer_idx : int
+        Layer index from 0 (bottom) to ``n_layers - 1`` (top).
+    fiber_idx : int
+        Fiber index within the layer, 0 to ``n_fibers_in_layer - 1``.
+
+    Raises
+    ------
+    KeyError
+        If a contributing shell's section can't be resolved.
+    ValueError
+        If the requested layer carries no fiber columns (use
+        :func:`compute_shell_cut_per_layer` instead).
+    IndexError
+        If ``layer_idx`` or ``fiber_idx`` is out of range.
+    """
+    if not isinstance(layer_idx, (int, np.integer)) or int(layer_idx) < 0:
+        raise ValueError(f"layer_idx must be a non-negative int, got {layer_idx!r}.")
+    if not isinstance(fiber_idx, (int, np.integer)) or int(fiber_idx) < 0:
+        raise ValueError(f"fiber_idx must be a non-negative int, got {fiber_idx!r}.")
+    layer_idx = int(layer_idx)
+    fiber_idx = int(fiber_idx)
+
+    intersections = find_shell_intersections(dataset, spec, clipper=clipper)
+
+    by_type: dict[str, list[ShellIntersection]] = {}
+    for ix in intersections:
+        by_type.setdefault(ix.element_type, []).append(ix)
+
+    per_shell_F: dict[int, np.ndarray] = {}
+    per_shell_M_at_mid: dict[int, np.ndarray] = {}
+    time: np.ndarray | None = None
+
+    for elem_type, sub in by_type.items():
+        eids = [ix.element_id for ix in sub]
+        er = dataset.elements.get_element_results(
+            results_name="section.fiber.stress",
+            element_type=elem_type,
+            model_stage=model_stage,
+            element_ids=eids,
+        )
+        n_ip = int(er.n_ip) if er.n_ip > 0 else 0
+        if n_ip == 0:
+            raise ValueError(
+                f"Shell {elem_type!r} has no integration points in the "
+                "section.fiber.stress result."
+            )
+        base_type = _strip_class_tag(elem_type)
+        for ix in sub:
+            layers = _resolve_layer_table(dataset, ix.element_id)
+            if layer_idx >= len(layers):
+                raise IndexError(
+                    f"layer_idx={layer_idx} out of range for element "
+                    f"{ix.element_id}: section has {len(layers)} layers."
+                )
+            layer = layers[layer_idx]
+            rows = er.df.xs(ix.element_id, level="element_id")
+            n_fibers = _discover_fiber_count_in_layer(rows.columns, layer_idx)
+            if n_fibers == 0:
+                raise ValueError(
+                    f"Element {ix.element_id}, layer {layer_idx}: no "
+                    "fiber-in-layer columns (`_f<F>_l<L>_ip<K>`) "
+                    "available. Use compute_shell_cut_per_layer for "
+                    "non-fibered layers."
+                )
+            if fiber_idx >= n_fibers:
+                raise IndexError(
+                    f"fiber_idx={fiber_idx} out of range for element "
+                    f"{ix.element_id} layer {layer_idx}: layer has "
+                    f"{n_fibers} fibers."
+                )
+            fiber_stress = _read_fiber_in_layer_stress_array(
+                rows, n_ip, layer_idx, fiber_idx,
+            )
+            # Uniform fiber distribution within the layer's thickness.
+            # Fiber k of N gets thickness t_layer / N, centred at
+            # z_layer + (k - (N-1)/2) * (t_layer / N).
+            t_fiber = float(layer.thickness) / float(n_fibers)
+            z_layer = float(layer.z_offset)
+            z_fiber = z_layer + (fiber_idx - 0.5 * (n_fibers - 1)) * t_fiber
+            fiber_layer_info = LayerInfo(
+                material_id=int(layer.material_id),
+                thickness=t_fiber,
+                z_offset=z_fiber,
+            )
+            F, M = _shell_cut_per_element_for_layer(
+                fiber_stress, fiber_layer_info, ix, dataset, spec, base_type,
+            )
+            per_shell_F[ix.element_id] = F
+            per_shell_M_at_mid[ix.element_id] = M
+        if time is None:
+            time = np.asarray(er.time, dtype=float)
+
+    if not intersections or time is None:
+        return ShellCutResult(
+            F=np.zeros((0, 3)),
+            M=np.zeros((0, 3)),
+            time=np.zeros((0,)),
+            centroid=np.zeros(3),
+            intersections=(),
+        )
+
+    centroid = np.mean(
+        np.stack([ix.chord_midpoint for ix in intersections], axis=0), axis=0
+    )
+    F_total = np.zeros((time.shape[0], 3), dtype=float)
+    M_total = np.zeros_like(F_total)
+    for ix in intersections:
+        Fi = per_shell_F[ix.element_id]
+        Mi = per_shell_M_at_mid[ix.element_id]
+        arm = ix.chord_midpoint - centroid
+        F_total += Fi
+        M_total += Mi + np.cross(arm, Fi)
+
+    return ShellCutResult(
+        F=F_total,
+        M=M_total,
+        time=time,
+        centroid=centroid,
+        intersections=tuple(intersections),
+        per_shell_F=per_shell_F,
+        per_shell_M_at_midpoint=per_shell_M_at_mid,
+    )
+
+
+def _shell_cut_per_element_for_layer(
+    layer_stress: np.ndarray,
+    layer,
+    intersection: ShellIntersection,
+    dataset: "MPCODataSet",
+    spec: "SectionCutSpec",
+    base_type: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Integrate one layer's traction along the chord of one shell.
+
+    Parallel to :func:`_shell_cut_per_element` — same chord, same
+    Gauss rule, same cut-normal orientation — but the 8-vector input
+    is built from the layer's Voigt stress, its thickness, and its
+    through-thickness offset rather than the recorded
+    ``section.force``.
+    """
+    chord = intersection.chord_endpoints_arr
+    L = intersection.chord_length
+    p_mid = intersection.chord_midpoint
+
+    n_shell = _midsurface_normal(intersection.midsurface_polygon_global)
+    chord_dir = chord[1] - chord[0]
+    chord_dir /= np.linalg.norm(chord_dir)
+    n_cut_global = np.cross(chord_dir, n_shell)
+    n_cut_norm = float(np.linalg.norm(n_cut_global))
+    if n_cut_norm < 1e-12:
+        return (
+            np.zeros((layer_stress.shape[0], 3)),
+            np.zeros((layer_stress.shape[0], 3)),
+        )
+    n_cut_global /= n_cut_norm
+    n_cut_global = _orient_cut_normal(
+        n_cut_global, intersection.midsurface_polygon_global, p_mid, spec,
+    )
+
+    R = dataset.cdata.rotation_matrix(intersection.element_id)
+    n_cut_local = R.T @ n_cut_global
+    n_x = float(n_cut_local[0])
+    n_y = float(n_cut_local[1])
+
+    gs, gw = _GAUSS_LEGENDRE_2
+    xi_a, eta_a = intersection.chord_param_natural[0]
+    xi_b, eta_b = intersection.chord_param_natural[1]
+    half_L = 0.5 * L
+
+    n_steps = layer_stress.shape[0]
+    F_local = np.zeros((n_steps, 3), dtype=float)
+    M_local = np.zeros((n_steps, 3), dtype=float)
+
+    t_k = float(layer.thickness)
+    z_k = float(layer.z_offset)
+
+    for s, w in zip(gs, gw):
+        alpha = 0.5 * (s + 1.0)
+        xi_g = (1 - alpha) * xi_a + alpha * xi_b
+        eta_g = (1 - alpha) * eta_a + alpha * eta_b
+        sigma = _sample_layer_stress(layer_stress, xi_g, eta_g, base_type)
+        # Voigt order matches _LAYER_STRESS_SHORTNAMES:
+        # (sigma11, sigma22, sigma33, sigma12, sigma23, sigma13)
+        s11 = sigma[:, 0]
+        s22 = sigma[:, 1]
+        # s33 is the through-thickness normal stress — not used in the
+        # shell section-force 8-vector (vanishes in classical plate
+        # theory and isn't part of (Fxx, Fyy, Fxy, ...)).
+        s12 = sigma[:, 3]
+        s23 = sigma[:, 4]
+        s13 = sigma[:, 5]
+        # Build the layer's contribution to the standard 8-vector and
+        # apply the same traction formulas as the full-section kernel:
+        #     Fxx^(k) = s11 * t_k
+        #     Mxx^(k) = s11 * t_k * z_k
+        # ... and so on. Substitute into the per-unit-length traction
+        # formulas.
+        Fxx = s11 * t_k
+        Fyy = s22 * t_k
+        Fxy = s12 * t_k
+        Mxx = s11 * t_k * z_k
+        Myy = s22 * t_k * z_k
+        Mxy = s12 * t_k * z_k
+        Vxz = s13 * t_k
+        Vyz = s23 * t_k
+        f_per_unit_x = Fxx * n_x + Fxy * n_y
+        f_per_unit_y = Fxy * n_x + Fyy * n_y
+        f_per_unit_z = Vxz * n_x + Vyz * n_y
+        m_per_unit_x = Mxx * n_x + Mxy * n_y
+        m_per_unit_y = Mxy * n_x + Myy * n_y
+        weight = w * half_L
+        F_local[:, 0] += weight * f_per_unit_x
+        F_local[:, 1] += weight * f_per_unit_y
+        F_local[:, 2] += weight * f_per_unit_z
+        M_local[:, 0] += weight * m_per_unit_x
+        M_local[:, 1] += weight * m_per_unit_y
 
     F_global = F_local @ R.T
     M_global = M_local @ R.T

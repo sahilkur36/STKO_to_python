@@ -38,7 +38,13 @@ import pandas as pd
 
 from .kernels.beam import BeamIntersection
 from .kernels.beam_resultant import compute_beam_cut
-from .kernels.shell import ShellIntersection, compute_shell_cut
+from .kernels.shell import (
+    ShellIntersection,
+    compute_shell_cut,
+    compute_shell_cut_per_fiber,
+    compute_shell_cut_per_layer,
+)
+from .kernels.solid import SolidIntersection, compute_solid_cut
 from .specs import SectionCutSpec
 
 if TYPE_CHECKING:
@@ -88,6 +94,9 @@ class SectionCut:
     shell_intersections: tuple[ShellIntersection, ...] = ()
     per_shell_F: dict[int, np.ndarray] = field(default_factory=dict)
     per_shell_M_at_midpoint: dict[int, np.ndarray] = field(default_factory=dict)
+    solid_intersections: tuple[SolidIntersection, ...] = ()
+    per_solid_F: dict[int, np.ndarray] = field(default_factory=dict)
+    per_solid_M_at_centroid: dict[int, np.ndarray] = field(default_factory=dict)
 
     # ------------------------------------------------------------------ #
     # Construction
@@ -102,13 +111,13 @@ class SectionCut:
     ) -> "SectionCut":
         """Compute the cut against ``dataset`` at ``model_stage``.
 
-        Composes the beam and shell kernels and aggregates ``(F, M)``
-        about a shared centroid (the mean of all reference points —
-        beam intersection points and shell chord midpoints). The solid
-        kernel will plug into the same composition in v2.0.
+        Composes the beam, shell, and solid kernels and aggregates
+        ``(F, M)`` about a shared centroid — the mean of all reference
+        points (beam intersection points, shell chord midpoints, and
+        solid polygon centroids).
         """
-        # Share one PolygonClipper between the two kernels so the plane
-        # basis isn't recomputed twice when bounding_polygon is set.
+        # Share one PolygonClipper across every kernel so the plane
+        # basis isn't recomputed when bounding_polygon is set.
         clipper = None
         if spec.bounding_polygon is not None:
             from .geometry import prepare_clipper
@@ -120,15 +129,20 @@ class SectionCut:
         shell = compute_shell_cut(
             dataset, spec, model_stage=model_stage, clipper=clipper,
         )
+        solid = compute_solid_cut(
+            dataset, spec, model_stage=model_stage, clipper=clipper,
+        )
 
-        # Pick a time axis from whichever kernel found something. Beam
-        # and shell readers route through the same broker, so when both
-        # have intersections their time arrays are identical by
+        # Pick a time axis from whichever kernel found something. All
+        # kernels route through the same broker, so when more than one
+        # has intersections their time arrays are identical by
         # construction.
         if not beam.is_empty:
             time = beam.time
         elif not shell.is_empty:
             time = shell.time
+        elif not solid.is_empty:
+            time = solid.time
         else:
             return cls(
                 spec=spec,
@@ -143,15 +157,20 @@ class SectionCut:
                 shell_intersections=(),
                 per_shell_F={},
                 per_shell_M_at_midpoint={},
+                solid_intersections=(),
+                per_solid_F={},
+                per_solid_M_at_centroid={},
             )
 
         # Aggregate F + M about the shared centroid of every reference
-        # point in both kernels.
+        # point across the three kernels.
         ref_points = []
         for b in beam.intersections:
             ref_points.append(b.point_arr)
         for s in shell.intersections:
             ref_points.append(s.chord_midpoint)
+        for ss in solid.intersections:
+            ref_points.append(ss.polygon_centroid)
         centroid = np.mean(np.stack(ref_points, axis=0), axis=0)
 
         F_total = np.zeros((time.shape[0], 3), dtype=float)
@@ -168,6 +187,12 @@ class SectionCut:
             arm = ix.chord_midpoint - centroid
             F_total += Fi
             M_total += Mi + np.cross(arm, Fi)
+        for ix in solid.intersections:
+            Fi = solid.per_solid_F[ix.element_id]
+            Mi = solid.per_solid_M_at_centroid[ix.element_id]
+            arm = ix.polygon_centroid - centroid
+            F_total += Fi
+            M_total += Mi + np.cross(arm, Fi)
 
         return cls(
             spec=spec,
@@ -182,6 +207,9 @@ class SectionCut:
             shell_intersections=shell.intersections,
             per_shell_F=dict(shell.per_shell_F),
             per_shell_M_at_midpoint=dict(shell.per_shell_M_at_midpoint),
+            solid_intersections=solid.intersections,
+            per_solid_F=dict(solid.per_solid_F),
+            per_solid_M_at_centroid=dict(solid.per_solid_M_at_centroid),
         )
 
     # ------------------------------------------------------------------ #
@@ -209,19 +237,26 @@ class SectionCut:
         return (
             len(self.intersections) == 0
             and len(self.shell_intersections) == 0
+            and len(self.solid_intersections) == 0
         )
 
     @property
     def contributing_element_ids(self) -> tuple[int, ...]:
         """All element ids whose contribution the cut sums up — beams
-        first, then shells, each block sorted by element_id."""
+        first, then shells, then solids; each block sorted by
+        element_id."""
         beam_ids = [ix.element_id for ix in self.intersections]
         shell_ids = [ix.element_id for ix in self.shell_intersections]
-        return tuple(beam_ids + shell_ids)
+        solid_ids = [ix.element_id for ix in self.solid_intersections]
+        return tuple(beam_ids + shell_ids + solid_ids)
 
     def __repr__(self) -> str:
         label = f", label={self.spec.label!r}" if self.spec.label else ""
-        n_total = len(self.intersections) + len(self.shell_intersections)
+        n_total = (
+            len(self.intersections)
+            + len(self.shell_intersections)
+            + len(self.solid_intersections)
+        )
         return (
             f"SectionCut(stage={self.model_stage!r}, n_steps={self.n_steps}, "
             f"n_intersections={n_total}, "
@@ -302,6 +337,161 @@ class SectionCut:
             data,
             columns=list(_COMPONENTS),
             index=pd.Index(self.time, name="time"),
+        )
+
+    # ------------------------------------------------------------------ #
+    # Per-layer view (v1.7) — layered-shell decomposition
+    # ------------------------------------------------------------------ #
+    def per_layer_force(
+        self,
+        layer_idx: int,
+        dataset: "MPCODataSet",
+    ) -> "SectionCut":
+        """Return a derivative cut from only one through-thickness layer
+        of the layered shells in this cut.
+
+        The math: instead of reading the through-thickness-integrated
+        ``section.force``, read ``section.fiber.stress`` and integrate
+        the layer's stress weighted by its thickness (for the force) and
+        its thickness × z_offset (for the moment). Beams and solids in
+        the original cut are dropped — per-layer breakdown is a
+        shell-only concept.
+
+        Summing all layers must recover the standard shell cut::
+
+            cut = ds.section_cut(...)
+            per_layers = [cut.per_layer_force(k, ds) for k in range(n_layers)]
+            np.testing.assert_allclose(
+                cut.F - sum(c.F for c in per_layers),
+                some_beam_solid_contributions,
+                atol=1e-3,
+            )
+
+        (The exact equality holds layer-by-layer when the cut contains
+        only shells; with mixed beam + solid + shell contributions, the
+        per-layer sums recover only the shell portion of the standard
+        cut.)
+
+        Parameters
+        ----------
+        layer_idx : int
+            Layer index, 0 (bottom) to ``n_layers - 1`` (top), matching
+            the ``LayeredShell`` definition in ``sections.tcl``.
+        dataset : MPCODataSet
+            Source data; needed to re-read ``section.fiber.stress`` and
+            to resolve the layer table for each contributing shell.
+
+        Raises
+        ------
+        ValueError
+            If this cut contains no shell intersections.
+        IndexError
+            If ``layer_idx`` is out of range for any contributing shell.
+        """
+        if not self.shell_intersections:
+            raise ValueError(
+                "per_layer_force requires at least one shell intersection; "
+                "this cut has none."
+            )
+        clipper = None
+        if self.spec.bounding_polygon is not None:
+            from .geometry import prepare_clipper
+            clipper = prepare_clipper(self.spec.plane, self.spec.bounding_polygon)
+        shell_layer = compute_shell_cut_per_layer(
+            dataset, self.spec,
+            model_stage=self.model_stage,
+            layer_idx=int(layer_idx),
+            clipper=clipper,
+        )
+        return SectionCut(
+            spec=self.spec,
+            model_stage=self.model_stage,
+            F=shell_layer.F,
+            M=shell_layer.M,
+            time=shell_layer.time,
+            centroid=shell_layer.centroid,
+            intersections=(),
+            per_beam_F={},
+            per_beam_M_at_intersection={},
+            shell_intersections=shell_layer.intersections,
+            per_shell_F=dict(shell_layer.per_shell_F),
+            per_shell_M_at_midpoint=dict(shell_layer.per_shell_M_at_midpoint),
+            solid_intersections=(),
+            per_solid_F={},
+            per_solid_M_at_centroid={},
+        )
+
+    def per_fiber_force(
+        self,
+        layer_idx: int,
+        fiber_idx: int,
+        dataset: "MPCODataSet",
+    ) -> "SectionCut":
+        """Return a derivative cut from one fiber within one
+        through-thickness layer of the layered shells in this cut.
+
+        Available only for layered shells whose layers carry fiber-
+        decomposed columns (``<comp>_f<F>_l<L>_ip<K>``). Layers backed
+        by a single ``nDMaterial`` raise — use :meth:`per_layer_force`
+        for those.
+
+        The fiber's tributary thickness defaults to ``t_layer /
+        n_fibers_in_layer`` (uniform distribution along the layer's
+        thickness); the fiber's z-offset is the centroid of that
+        sub-band relative to the section midplane. Summing all fibers
+        within a layer recovers that layer's standard per-layer cut.
+
+        Parameters
+        ----------
+        layer_idx : int
+            Layer index, 0 (bottom) to ``n_layers - 1`` (top).
+        fiber_idx : int
+            Fiber index within the layer, 0 to
+            ``n_fibers_in_layer - 1``.
+        dataset : MPCODataSet
+            Source data; needed to re-read ``section.fiber.stress`` and
+            to resolve the layer table for each contributing shell.
+
+        Raises
+        ------
+        ValueError
+            If this cut contains no shell intersections, or if the
+            layer carries no fiber decomposition.
+        IndexError
+            If ``layer_idx`` or ``fiber_idx`` is out of range.
+        """
+        if not self.shell_intersections:
+            raise ValueError(
+                "per_fiber_force requires at least one shell intersection; "
+                "this cut has none."
+            )
+        clipper = None
+        if self.spec.bounding_polygon is not None:
+            from .geometry import prepare_clipper
+            clipper = prepare_clipper(self.spec.plane, self.spec.bounding_polygon)
+        shell_fiber = compute_shell_cut_per_fiber(
+            dataset, self.spec,
+            model_stage=self.model_stage,
+            layer_idx=int(layer_idx),
+            fiber_idx=int(fiber_idx),
+            clipper=clipper,
+        )
+        return SectionCut(
+            spec=self.spec,
+            model_stage=self.model_stage,
+            F=shell_fiber.F,
+            M=shell_fiber.M,
+            time=shell_fiber.time,
+            centroid=shell_fiber.centroid,
+            intersections=(),
+            per_beam_F={},
+            per_beam_M_at_intersection={},
+            shell_intersections=shell_fiber.intersections,
+            per_shell_F=dict(shell_fiber.per_shell_F),
+            per_shell_M_at_midpoint=dict(shell_fiber.per_shell_M_at_midpoint),
+            solid_intersections=(),
+            per_solid_F={},
+            per_solid_M_at_centroid={},
         )
 
     # ------------------------------------------------------------------ #

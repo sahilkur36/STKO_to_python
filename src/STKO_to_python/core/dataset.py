@@ -20,6 +20,28 @@ from ..plotting.plot_settings import PlotSettings
 logger = logging.getLogger(__name__)
 
 
+def _apply_per_layer_per_fiber(cut, dataset, per_layer, per_fiber):
+    """Apply optional ``per_layer`` / ``per_fiber`` short-circuit to a cut.
+
+    Resolution rules:
+
+    - Neither flag set → return the standard cut unchanged.
+    - Only ``per_layer`` → return the per-layer view.
+    - Both flags set → return the per-fiber-in-layer view.
+    - Only ``per_fiber`` (without ``per_layer``) → error.
+    """
+    if per_layer is None and per_fiber is None:
+        return cut
+    if per_fiber is not None and per_layer is None:
+        raise ValueError(
+            "per_fiber requires per_layer to also be specified — fibers are "
+            "indexed within a single layer."
+        )
+    if per_fiber is not None:
+        return cut.per_fiber_force(int(per_layer), int(per_fiber), dataset)
+    return cut.per_layer_force(int(per_layer), dataset)
+
+
 class MPCODataSet:
     
     """
@@ -292,6 +314,29 @@ class MPCODataSet:
         """
         return SelectionSetResolver(self.selection_set)
 
+    @cached_property
+    def layered_sections(self) -> Dict[int, tuple]:
+        """``{section_id -> tuple[LayerInfo, ...]}`` parsed from sections.tcl.
+
+        Lazy. Searches the dataset directory (and its parent) for a
+        ``sections.tcl`` file and parses every ``section LayeredShell``
+        statement. Returns an empty dict if no script is found — the
+        per-layer cut surface
+        (:meth:`SectionCut.per_layer_force`) raises a clear error in
+        that case rather than silently zeroing.
+
+        See :mod:`STKO_to_python.model.layered_section_reader` for the
+        format and :class:`LayerInfo` for the per-layer record.
+        """
+        from ..model.layered_section_reader import (
+            find_sections_tcl,
+            parse_sections_tcl,
+        )
+        path = find_sections_tcl(self.hdf5_directory)
+        if path is None:
+            return {}
+        return parse_sections_tcl(path)
+
     def section_cut(
         self,
         *,
@@ -305,6 +350,8 @@ class MPCODataSet:
         label=None,
         name=None,
         bounding_polygon=None,
+        per_layer: Optional[int] = None,
+        per_fiber: Optional[int] = None,
     ):
         """Compute a section cut against this dataset.
 
@@ -321,6 +368,17 @@ class MPCODataSet:
         inside it — handy when the recorded selection sets don't
         pre-filter to a structural sub-region. See
         :class:`SectionCutSpec` for the validation rules.
+
+        ``per_layer`` (optional, v1.7+) short-circuits to the per-layer
+        view: the returned cut contains only the contribution of the
+        specified through-thickness layer of the layered shells in the
+        filter. Beams and solids are dropped from the per-layer view.
+
+        ``per_fiber`` (optional, v1.8+) further restricts the cut to
+        one fiber within the per-layer view; requires ``per_layer`` to
+        also be set. The fiber's tributary thickness is the layer
+        thickness divided by the layer's fiber count
+        (uniformly distributed).
 
         Returns a :class:`~STKO_to_python.cuts.SectionCut` carrying the
         ``(F, M)`` resultant time series, intersection records, and the
@@ -355,7 +413,8 @@ class MPCODataSet:
                 raise TypeError(
                     f"spec must be a SectionCutSpec, got {type(spec).__name__}."
                 )
-            return SectionCut.compute(spec, self, model_stage=model_stage)
+            cut = SectionCut.compute(spec, self, model_stage=model_stage)
+            return _apply_per_layer_per_fiber(cut, self, per_layer, per_fiber)
 
         if plane is None:
             raise ValueError(
@@ -371,7 +430,8 @@ class MPCODataSet:
             name=name,
             bounding_polygon=bounding_polygon,
         )
-        return SectionCut.compute(new_spec, self, model_stage=model_stage)
+        cut = SectionCut.compute(new_spec, self, model_stage=model_stage)
+        return _apply_per_layer_per_fiber(cut, self, per_layer, per_fiber)
 
     def section_sweep(
         self,

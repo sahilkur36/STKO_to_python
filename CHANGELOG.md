@@ -12,6 +12,225 @@ spelled out in [`CLAUDE.md`](CLAUDE.md#versioning-policy):
 
 ## [Unreleased]
 
+## [1.8.0] — 2026-05-12
+
+Extends v1.7 with **higher-order solid section cuts** (20- and 27-node
+hexahedra) and the **per-fiber breakdown for fibered layers** in
+layered shells. Both are additive — the v1.7 surface (beam + shell +
+solid composition, per-layer shell view) is unchanged; v1.8 adds new
+element classes the solid kernel accepts and a new
+`SectionCut.per_fiber_force` accessor.
+
+### Added
+
+- **Higher-order solid section cuts** — `Brick20`, `Brick27`, and the
+  OpenSees aliases `TwentyNodeBrick` / `TwentySevenNodeBrick` join the
+  solid kernel's registry. The geometry phase uses the first 8 nodes
+  (corners) for the plane-vs-polyhedron polygon math — sound because
+  the corners define the element's convex hull and the cut polygon
+  math is on convex polyhedra. Stress sampling dispatches on IP count:
+  8-pt 2×2×2 stays trilinear; 27-pt 3×3×3 uses **triquadratic
+  Lagrange** interpolation over the tensor-product grid. Curvature
+  induced by midpoint / face / centre nodes is ignored at the geometry
+  layer — adequate for any well-conditioned higher-order hex.
+- **27-IP triquadratic sampler** — `_brick_27ip_weights(ξ, η, ζ)`
+  returns the 27 tensor-product Lagrange weights at the 3×3×3
+  Gauss-Legendre IPs (1-D nodes at `±√(3/5)` and 0). Partition of
+  unity, unit response at each IP, and exact reproduction of any
+  separable triquadratic polynomial are pinned by tests.
+- **Per-fiber breakdown for fibered layers** —
+  `SectionCut.per_fiber_force(layer_idx, fiber_idx, dataset)` returns
+  a derivative cut from one fiber inside one through-thickness layer
+  of the layered shells in the cut. Required when a layer is itself a
+  Fiber section; the MPCO recorder then writes columns named
+  `<comp>_f<F>_l<L>_ip<K>`. The fiber's tributary thickness defaults
+  to `t_layer / n_fibers_in_layer` (uniform distribution within the
+  layer); the fiber's z-offset is the centroid of that sub-band.
+  Summing all fibers in a layer recovers the per-layer cut for that
+  layer.
+- **`ds.section_cut(..., per_layer=k, per_fiber=f)`** — both shortcuts
+  resolved together: with only `per_layer` the dataset returns the
+  per-layer view; with both, it returns the per-fiber-in-layer view.
+  `per_fiber` without `per_layer` raises — fibers are indexed within a
+  single layer.
+
+### Added (internal)
+
+- `STKO_to_python.cuts.kernels.solid._brick_27ip_1d_lagrange` and
+  `_brick_27ip_weights` — pure-math triquadratic Lagrange basis at the
+  3-pt Gauss-Legendre nodes and the resulting 27-IP tensor-product
+  weights. Both are independently tested.
+- `_CORNER_NODES_PER_CLASS` — fixed mapping from element class to the
+  number of corner nodes the geometry phase consumes (8 for any hex
+  variant; 4 for the tet). Higher-order classes carry richer
+  connectivity but the geometry sub-frame is always 8 corners.
+- `STKO_to_python.cuts.kernels.shell._fiber_in_layer_column_candidates`,
+  `_read_fiber_in_layer_stress_array`, and
+  `_discover_fiber_count_in_layer` — read `<comp>_f<F>_l<L>_ip<K>`
+  columns under both naming conventions (`sigma11_f<F>_l<L>_ip<K>` and
+  the `nDMaterial`-fallback `UnknownStress(n)_f<F>_l<L>_ip<K>`). The
+  fiber count is discovered from the available columns rather than
+  hard-coded — the same kernel works for sections with arbitrary
+  fiber counts per layer.
+- `STKO_to_python.cuts.kernels.shell.compute_shell_cut_per_fiber` —
+  parallel to `compute_shell_cut_per_layer`. Uses the uniform fiber
+  distribution to compute the fiber's tributary `LayerInfo` (subset
+  of the layer's thickness centred at the fiber's z-band centroid)
+  and delegates to `_shell_cut_per_element_for_layer`.
+
+### Test coverage
+
+- `tests/unit/cuts/test_solid_kernel.py` gains 8 new tests covering
+  the higher-order machinery: registry contents (Brick20 / Brick27 /
+  OpenSees aliases), node-count mapping (20 vs 27 connectivity, 8
+  corners for the geometry phase), 1-D Lagrange basis (unit response,
+  partition of unity), 27-IP weights (partition of unity at origin,
+  unit response at each of the 27 IPs, exact reproduction of a
+  separable triquadratic), dispatch into the 27-IP sampler from
+  `_sample_solid_stress`, and a corner-only plane-vs-polyhedron test
+  on a synthetic 20-node hex.
+- `tests/unit/cuts/test_per_layer_shell.py` gains 8 new tests covering
+  the fiber-in-layer reader (`sigma11_f<F>_l<L>_ip<K>` and
+  `UnknownStress(n)_f<F>_l<L>_ip<K>` variants, missing-layer fallback
+  to zero, fiber count discovery, the `per_fiber` inline-form
+  argument contract, and the "non-fibered layer + `per_fiber_force`"
+  error path).
+
+### Out of scope (v1.9 candidates)
+
+- Curved-edge geometry on higher-order hexes — `Brick20` / `Brick27`
+  midpoints define an actual curved face on the element interior,
+  which the current corner-only polygon math ignores. For
+  well-conditioned models this is an O(midpoint-deviation²) error
+  that doesn't affect resultants meaningfully; for badly-shaped
+  higher-order elements it can.
+- Explicit fiber positions for fibered layers — the v1.8 kernel
+  assumes uniform distribution within a layer. Real fiber positions
+  may be specified in the OpenSees model and would arrive via the
+  `.cdata` or `sections.tcl`.
+- 10-node tetrahedra (`TenNodeTetrahedron` and friends), wedge, and
+  pyramid solids — not in the static catalog.
+
+## [1.7.0] — 2026-05-12
+
+Adds the **solid (continuum) section-cut kernel** and the **per-layer
+breakdown for layered shells**. Both are additive — no breaking changes
+to the public surface. Section cuts now compose contributions from
+beams, shells, and solids in a single `SectionCut.compute` call; the
+per-layer view exposes the through-thickness slice of a layered-shell
+cut.
+
+### Added
+
+- **Solid section-cut kernel** — `compute_solid_cut` integrates
+  `material.stress` (six Voigt components per IP — `σ11, σ22, σ33,
+  σ12, σ23, σ13` in global frame) over the planar polygon clipped from
+  each crossing continuum element. Plane-vs-polyhedron geometry walks
+  the element's edges (12 for an 8-node hex, 6 for a 4-node tet),
+  collects crossings + on-plane vertices, dedupes, and sorts CCW around
+  the plane normal. The polygon is fan-triangulated; each triangle
+  gets a 3-point Gauss rule. Trilinear inversion at each quadrature
+  point pulls (ξ, η, ζ) for stress sampling; the traction
+  `t = σ · n_cut` integrates to the resultant force in global frame.
+  Supports `Brick`, `BbarBrick`, `SSPbrick` (all 8-node hexes) and
+  `FourNodeTetrahedron`.
+- **Side-aware shared-face resolution for solids** — when a cut plane
+  lands on the shared face between two adjacent solids, the same
+  side-aware filter used in the shell kernel skips elements whose
+  interior is entirely on the kept side; avoids double-counts at mesh
+  boundaries.
+- **`SectionCut.compute` composition over three kernels** — beam +
+  shell + solid in one pass, sharing a `PolygonClipper` so the plane
+  basis isn't recomputed. New `solid_intersections`, `per_solid_F`,
+  `per_solid_M_at_centroid` fields on `SectionCut`;
+  `contributing_element_ids` walks all three kernels.
+- **Per-layer breakdown for layered shells** —
+  `SectionCut.per_layer_force(layer_idx, dataset)` returns a
+  derivative cut from only one through-thickness layer of the
+  contributing layered shells. The math replaces the through-thickness
+  integrated `section.force` with the per-layer contribution
+  `(σ_11^(k) · t_k, σ_22^(k) · t_k, σ_12^(k) · t_k, σ_11^(k) · t_k ·
+  z_k, ...)` and reuses the same chord integration + rotation. Summing
+  every layer's contribution recovers the standard cut to numerical
+  tolerance (verified on Test_NLShell, 7-layer wall sections 15/16).
+  `dataset.section_cut(..., per_layer=k)` short-circuits to the
+  per-layer view.
+- **`MPCODataSet.layered_sections`** — lazy property that locates and
+  parses `sections.tcl` beside the recorder output. Returns
+  `{section_id: tuple[LayerInfo, ...]}` where each `LayerInfo` carries
+  `material_id`, `thickness`, and `z_offset` (signed distance from the
+  section midplane). Empty dict when no script is found — the
+  per-layer surface raises a clear error in that case rather than
+  silently zeroing.
+- **`STKO_to_python.model.layered_section_reader`** — new module with
+  `LayerInfo` dataclass, `parse_sections_tcl(path)` parser, and
+  `find_sections_tcl(directory)` locator. Handles Tcl line
+  continuations, multiple section blocks, comments, and the
+  per-section sanity check that the body has 2·n tokens for n declared
+  layers.
+
+### Added (internal)
+
+- `STKO_to_python.cuts.kernels.solid` — `SOLID_ELEMENT_CLASSES`
+  registry, `SolidIntersection` record carrying both the planar
+  polygon in global coords and its natural-coord image,
+  `find_solid_intersections`, `compute_solid_cut`, `SolidCutResult`.
+  Helpers cover plane-vs-polyhedron polygon math, hex trilinear /
+  tet linear inverse maps, Voigt-to-tensor stress expansion, and a
+  Sutherland-Hodgman polygon-vs-polygon clip used when a
+  `bounding_polygon` is set.
+- `STKO_to_python.cuts.kernels.shell.compute_shell_cut_per_layer` —
+  parallel to `compute_shell_cut`. The standard `section.force`
+  8-vector is built from a single layer's stress and geometric weights
+  rather than read from the recorder. Recognises three column-naming
+  conventions for `section.fiber.stress`: explicit
+  `sigma11_l<L>_ip<K>`, explicit `sigma11_f<L>_ip<K>`, and the
+  `nDMaterial`-fallback `UnknownStress(n)_f<L>_ip<K>` mapped to
+  `(σ11, σ22, σ12, σ13, σ23)` per the PlateFiber convention.
+
+### Test coverage
+
+- `tests/unit/cuts/test_solid_kernel.py` — 33 tests split into
+  pure-math and real-fixture groups. Pure-math (23 tests) covers
+  the trilinear IP weights (partition of unity, unit response at each
+  IP, linear-field reproduction), the Voigt-to-tensor mapping
+  (symmetry, traction against unit normal), the brick / tet inverse
+  shape-function maps, and the plane-vs-polyhedron polygon math
+  (horizontal cut → square, diagonal cut → hexagon, face-aligned cut
+  → 4 on-plane vertices, plane missing the polyhedron → None, tet
+  cut → triangle). Real-fixture tests (10 tests, gated on
+  `solid_partition_example`) verify the geometry phase, Newton's-3rd-
+  law consistency, side-flip equivalence, the mixed beam + solid
+  composition through `SectionCut.compute`, and that `per_solid_F`
+  actually pulls real stress data.
+- `tests/unit/cuts/test_per_layer_shell.py` — 21 tests covering
+  the layered Voigt stress reader (single layer, multi-layer
+  disambiguation, multi-IP), the `_sample_layer_stress` IP-weight
+  dispatch on Q4/T3, and the `sections.tcl` parser (parses
+  Test_NLShell's two `LayeredShell` blocks, layer thicknesses,
+  symmetric z_offsets, missing-file error, truncated-body error,
+  comment skipping). Real-fixture tests against `Test_NLShell`
+  validate the dataset's `layered_sections` accessor, the per-layer
+  cut's shape and contents, the **sum-of-layers = full-cut**
+  identity (Σ_k F^(k) ≈ cut.F to ~1% of the cut magnitude across the
+  step axis), error paths for out-of-range layer indices and
+  shell-less cuts, and the `dataset.section_cut(..., per_layer=k)`
+  inline form.
+
+### Out of scope (v1.8 candidates)
+
+- Higher-order solids (Brick20, Brick27 connectivity beyond 8-node
+  hex). The 27-IP catalog entry already exists for 2×2×2 sampling on
+  a Brick8; full Brick27 connectivity is v1.8.
+- Per-fiber stress on layered shells (one level deeper than per-
+  layer). The MPCO format already supports it (the column-name parser
+  handles `_f<F>_l<L>_ip<K>` suffixes); the surface to expose it is
+  v1.8.
+- Non-convex intersection polygons. The current solid kernel assumes
+  convexity, which all standard FE element shapes satisfy.
+- Wedge / pyramid solids — not in the static catalog. Treat as
+  follow-up.
+
 ## [1.6.0] — 2026-05-12
 
 Extends the v1.5.0 section-cut subpackage with the **shell kernel**
@@ -452,7 +671,11 @@ transparently.
 
 See `git log --merges v1.0.0` for the full pre-1.0 history.
 
-[Unreleased]: https://github.com/nmorabowen/STKO_to_python/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/nmorabowen/STKO_to_python/compare/v1.8.0...HEAD
+[1.8.0]: https://github.com/nmorabowen/STKO_to_python/compare/v1.7.0...v1.8.0
+[1.7.0]: https://github.com/nmorabowen/STKO_to_python/compare/v1.6.0...v1.7.0
+[1.6.0]: https://github.com/nmorabowen/STKO_to_python/compare/v1.5.0...v1.6.0
+[1.5.0]: https://github.com/nmorabowen/STKO_to_python/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/nmorabowen/STKO_to_python/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/nmorabowen/STKO_to_python/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/nmorabowen/STKO_to_python/compare/v1.1.0...v1.2.0

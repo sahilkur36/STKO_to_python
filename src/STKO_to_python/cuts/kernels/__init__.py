@@ -16,7 +16,16 @@ from .shell import (
     ShellCutResult,
     ShellIntersection,
     compute_shell_cut,
+    compute_shell_cut_per_fiber,
+    compute_shell_cut_per_layer,
     find_shell_intersections,
+)
+from .solid import (
+    SOLID_ELEMENT_CLASSES,
+    SolidCutResult,
+    SolidIntersection,
+    compute_solid_cut,
+    find_solid_intersections,
 )
 
 __all__ = [
@@ -30,4 +39,11 @@ __all__ = [
     "find_shell_intersections",
     "ShellCutResult",
     "compute_shell_cut",
+    "compute_shell_cut_per_layer",
+    "compute_shell_cut_per_fiber",
+    "SOLID_ELEMENT_CLASSES",
+    "SolidIntersection",
+    "find_solid_intersections",
+    "SolidCutResult",
+    "compute_solid_cut",
 ]
