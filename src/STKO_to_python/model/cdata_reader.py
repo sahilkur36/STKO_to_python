@@ -1,7 +1,10 @@
 
 
+from __future__ import annotations
+
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional, Union
+
 import numpy as np
 
 
@@ -11,6 +14,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+SelectionSetIdsArg = Union[int, "np.integer", list, None]
+
+
 class CDataReader:
     """Canonical Layer 3 reader for MPCO ``.cdata`` sidecar files.
 
@@ -18,148 +24,150 @@ class CDataReader:
     this module; new code should prefer ``CDataReader``.
     """
 
-    def __init__(self, dataset:'MPCODataSet'):
+    def __init__(self, dataset: "MPCODataSet"):
         self.dataset = dataset
-    
-    def _extract_selection_set_ids_for_file(self, file_path:str, selection_set_ids=None):
-        """
-        Extracts selection set IDs and associated data (nodes and elements) from the given file using NumPy for optimization.
+
+    def _extract_selection_set_ids_for_file(
+        self,
+        file_path: str,
+        selection_set_ids: SelectionSetIdsArg = None,
+    ) -> list[dict]:
+        """Parse all ``*SELECTION_SET`` blocks from a single ``.cdata`` file.
 
         Args:
-            file_path (str): Path to the .cdata file.
-            selection_set_ids (list, optional): List of selection set IDs to extract. If None, process all.
+            file_path: Path to the ``.cdata`` file.
+            selection_set_ids: Optional ID filter. If ``None``, every set is
+                parsed.
 
         Returns:
-            list: A list of dictionaries containing selection set data.
+            List of dicts, one per selection set, each with keys
+            ``SET_ID``, ``SET_NAME``, ``NODES`` (numpy ``int`` array),
+            ``ELEMENTS`` (numpy ``int`` array). ``NODES``/``ELEMENTS``
+            keys are absent when the count is zero.
+
+        Raises:
+            OSError: If the file cannot be opened.
+            ValueError, IndexError: If the file is malformed. The
+                original traceback is logged with file context.
         """
-        
-        if isinstance(selection_set_ids, (int, float)):
-            selection_set_ids = [selection_set_ids]
-        
+        if isinstance(selection_set_ids, (int, np.integer)):
+            selection_set_ids = [int(selection_set_ids)]
+
         if selection_set_ids is not None and not isinstance(selection_set_ids, list):
             raise ValueError("CData Error: selection_set_ids must be a list of integers or None.")
-        
-        selection_sets = []  # Store extracted data
+
+        selection_sets: list[dict] = []
 
         try:
-            with open(file_path, 'r') as file:
-                lines = file.readlines()
+            # errors="replace" guards against non-UTF-8 bytes in the file
+            # (e.g. comments emitted by a legacy STKO build) without
+            # silently dropping legitimate UTF-8 selection-set names.
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
 
-                # Convert lines to a NumPy array for efficient slicing
-                lines_array = np.array(lines, dtype=str)
+            for i, line in enumerate(lines):
+                if line.strip() != "*SELECTION_SET":
+                    continue
 
-                # Iterate through lines to find *SELECTION_SET
-                for i, line in enumerate(lines_array):
-                    if line.strip() == "*SELECTION_SET":
-                        # Get SET_ID info
-                        set_id = int(lines_array[i + 1].strip())
-
-                        # Skip if this selection set ID is not in the provided list
-                        if selection_set_ids is not None and set_id not in selection_set_ids:
-                            continue
-
-                        # Extract the SET_NAME, keeping only the name
-                        raw_set_name = lines_array[i + 2].strip()
-                        name_length = int(raw_set_name.split()[0])  # Extract the length of the name
-                        set_name = raw_set_name[len(str(name_length)) + 1 : len(str(name_length)) + 1 + name_length]  # Extract the actual name
-                        
-                        number_of_nodes = int(lines_array[i + 3].strip())
-                        number_of_elements = int(lines_array[i + 4].strip())
-
-                        # Initialize selection set data
-                        selection_set = {
-                            "SET_ID": set_id,
-                            "SET_NAME": set_name,
-                        }
-
-                        # Extract nodes if number_of_nodes > 0
-                        if number_of_nodes > 0:
-                            nodes_start_line = i + 5
-                            nodes_end_line = nodes_start_line + (number_of_nodes + 9) // 10
-                            node_lines = lines_array[nodes_start_line:nodes_end_line]
-                            # Combine and convert to a NumPy array
-                            selection_set["NODES"] = np.fromstring(" ".join(node_lines).strip(), sep=" ", dtype=int)
-
-                        # Extract elements if number_of_elements > 0
-                        if number_of_elements > 0:
-                            elements_start_line = nodes_end_line
-                            elements_end_line = elements_start_line + (number_of_elements + 9) // 10
-                            element_lines = lines_array[elements_start_line:elements_end_line]
-                            # Combine and convert to a NumPy array
-                            selection_set["ELEMENTS"] = np.fromstring(" ".join(element_lines).strip(), sep=" ", dtype=int)
-
-                        # Add the parsed selection set to the list
-                        selection_sets.append(selection_set)
-
-        except Exception as e:
-            print(f"CData Error processing file {file_path}: {e}")
-            return []
-
-        return selection_sets
-    
-    def _extract_selection_set_ids(self, selection_set_ids=None):
-        """
-        
-        Aggregates nodes and elements while maintaining the structure of each selection set.
-
-        Args:
-            fileName (str): Name of the `.cdata` file to process.
-            selection_set_ids (list, optional): List of selection set IDs to extract. If None, all sets are included.
-
-        Returns:
-            dict: A dictionary where each key is a selection set ID, and the value is another dictionary
-                containing 'SET_NAME', 'NODES', and 'ELEMENTS'.
-        """
-        if isinstance(selection_set_ids, (int, float)):
-            selection_set_ids = [selection_set_ids]
-        
-        if selection_set_ids is not None and not isinstance(selection_set_ids, list):
-            raise ValueError("selection_set_ids must be a list of integers or None.")
-
-        aggregated_data = {}
-
-        # Get the list of `.cdata` files
-        file_mapping = self.dataset.cdata_partitions
-
-        for id, file_path in file_mapping.items():
-            # Extract selection sets for the current file
-            selection_sets = self._extract_selection_set_ids_for_file(file_path, selection_set_ids=selection_set_ids)
-
-            # Aggregate each selection set by its SET_ID
-            for selection_set in selection_sets:
-                set_id = selection_set["SET_ID"]
-
-                # Skip if the set ID is not in the provided list
+                set_id = int(lines[i + 1].strip())
                 if selection_set_ids is not None and set_id not in selection_set_ids:
                     continue
 
+                raw_set_name = lines[i + 2].strip()
+                name_length = int(raw_set_name.split()[0])
+                offset = len(str(name_length)) + 1
+                set_name = raw_set_name[offset : offset + name_length]
+
+                number_of_nodes = int(lines[i + 3].strip())
+                number_of_elements = int(lines[i + 4].strip())
+
+                selection_set: dict = {"SET_ID": set_id, "SET_NAME": set_name}
+
+                # Elements come right after the (possibly empty) nodes
+                # block. Initialize unconditionally so NNODES=0 with
+                # NELEMENTS>0 doesn't reference an unbound name.
+                elements_start_line = i + 5
+
+                if number_of_nodes > 0:
+                    nodes_end_line = elements_start_line + (number_of_nodes + 9) // 10
+                    node_lines = lines[elements_start_line:nodes_end_line]
+                    selection_set["NODES"] = np.fromstring(
+                        " ".join(node_lines).strip(), sep=" ", dtype=int
+                    )
+                    elements_start_line = nodes_end_line
+
+                if number_of_elements > 0:
+                    elements_end_line = elements_start_line + (number_of_elements + 9) // 10
+                    element_lines = lines[elements_start_line:elements_end_line]
+                    selection_set["ELEMENTS"] = np.fromstring(
+                        " ".join(element_lines).strip(), sep=" ", dtype=int
+                    )
+
+                selection_sets.append(selection_set)
+
+        except Exception:
+            # Re-raise so the dataset fails loudly at construction;
+            # silently returning [] used to mask broken cdata files
+            # until a downstream selection-set query crashed.
+            logger.exception("CData parse error in %s", file_path)
+            raise
+
+        return selection_sets
+
+    def _extract_selection_set_ids(
+        self,
+        selection_set_ids: SelectionSetIdsArg = None,
+    ) -> dict[int, dict]:
+        """Aggregate selection sets across every ``.cdata`` partition.
+
+        Args:
+            selection_set_ids: Optional ID filter. If ``None``, every set
+                from every partition is aggregated.
+
+        Returns:
+            Dict mapping ``set_id -> {"SET_NAME": str, "NODES": list[int],
+            "ELEMENTS": list[int]}``. Member lists are sorted and
+            deduplicated across partitions.
+        """
+        if isinstance(selection_set_ids, (int, np.integer)):
+            selection_set_ids = [int(selection_set_ids)]
+
+        if selection_set_ids is not None and not isinstance(selection_set_ids, list):
+            raise ValueError("selection_set_ids must be a list of integers or None.")
+
+        aggregated_data: dict[int, dict] = {}
+        file_mapping = self.dataset.cdata_partitions
+
+        for file_path in file_mapping.values():
+            selection_sets = self._extract_selection_set_ids_for_file(
+                file_path, selection_set_ids=selection_set_ids
+            )
+
+            for selection_set in selection_sets:
+                set_id = selection_set["SET_ID"]
+
                 if set_id not in aggregated_data:
-                    # Initialize a new entry for this selection set
                     aggregated_data[set_id] = {
                         "SET_NAME": selection_set["SET_NAME"],
                         "NODES": set(selection_set.get("NODES", [])),
                         "ELEMENTS": set(selection_set.get("ELEMENTS", [])),
                     }
                 else:
-                    # Update existing entry by merging nodes and elements
                     aggregated_data[set_id]["NODES"].update(selection_set.get("NODES", []))
                     aggregated_data[set_id]["ELEMENTS"].update(selection_set.get("ELEMENTS", []))
 
-        # Convert sets to sorted lists for final output
         for set_id in aggregated_data:
             aggregated_data[set_id]["NODES"] = sorted(aggregated_data[set_id]["NODES"])
             aggregated_data[set_id]["ELEMENTS"] = sorted(aggregated_data[set_id]["ELEMENTS"])
 
         return aggregated_data
-    
-    def print_selection_set_names(self):
-        """
-        Prints the names of all available selection sets.
-        """
+
+    def print_selection_set_names(self) -> None:
+        """Emit names of all available selection sets at INFO level."""
         selection_sets = self.dataset.selection_set
-        print('Available selection sets:')
-        for key in selection_sets.keys():
-            print(f'Set id:{key} - Set name: {selection_sets[key]["SET_NAME"]}')
+        logger.info("Available selection sets:")
+        for key, payload in selection_sets.items():
+            logger.info("  Set id: %s - Set name: %s", key, payload["SET_NAME"])
 
 
 # The legacy ``CData`` alias lives on the ``STKO_to_python.model``
