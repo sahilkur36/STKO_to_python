@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "STKO_to_python"
-version = "1.8.0"
+version = "1.9.0"
 description = "STKO tools for Python"
 readme = "README.md"
 authors = [
@@ -62,6 +62,40 @@ docs = [
     "mkdocs>=1.6",
     "mkdocs-material>=9.5",
     "mkdocstrings[python]>=0.25",
+]
+# Installed with: pip install -e ".[viewer-3d]"
+# 3D rendering stack for the viewer subpackage (PyVista + VTK). Used
+# for off-screen rendering, notebook-embedded scenes, and as the base
+# for the Qt and headless extras below. See docs/viewer/00-roadmap.md.
+viewer-3d = [
+    "pyvista>=0.43",
+    "vtk>=9.2",
+]
+# Installed with: pip install -e ".[viewer-headless]"
+# Off-screen rendering + animation export for cluster / batch use. No
+# display required. See docs/viewer/03-deployment-targets.md.
+viewer-headless = [
+    "STKO_to_python[viewer-3d]",
+    "imageio>=2.30",
+    "imageio-ffmpeg>=0.4",
+]
+# Installed with: pip install -e ".[viewer]"
+# Full desktop GUI: Qt window with embedded PyVista viewport, time
+# scrubber, picking, settings panels. The "full experience" target.
+viewer = [
+    "STKO_to_python[viewer-3d]",
+    "PySide6>=6.5",
+    "pyvistaqt>=0.11",
+    "qtpy",
+]
+# Installed with: pip install -e ".[viewer-web]"
+# Placeholder for the Phase 6 Trame web viewer (deferred). Listed now
+# so the extras matrix is complete in v1.9.0.
+viewer-web = [
+    "STKO_to_python[viewer-3d]",
+    "trame>=3.0",
+    "trame-vtk",
+    "trame-vuetify",
 ]
 
 [project.urls]

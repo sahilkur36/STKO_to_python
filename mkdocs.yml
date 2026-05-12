@@ -80,7 +80,12 @@ nav:
   - Architecture: architecture.md
   - MPCO format conventions: mpco_format_conventions.md
   - Design spec (historical): architecture-refactor-proposal.md
-  - Viewer refactor (design directive): viewer-refactor-directives.md
+  - Viewer:
+      - Design directive: viewer-refactor-directives.md
+      - Roadmap: viewer/00-roadmap.md
+      - Architecture: viewer/01-architecture.md
+      - Porting from apeGmsh: viewer/02-porting-from-apegmsh.md
+      - Deployment targets: viewer/03-deployment-targets.md
   - API reference:
       - Overview: api/index.md
       - MPCODataSet: api/mpco-dataset.md

@@ -42,3 +42,30 @@ jobs:
 
       - name: Run pytest
         run: pytest tests/ -q
+
+  viewer-extras:
+    # Verifies the viewer optional extras resolve and import cleanly.
+    # Runs the same smoke tests as the base matrix above plus the
+    # extras-gated tests that the base matrix skips. Single Python
+    # version is enough for a dep-resolution gate; the base matrix
+    # already covers cross-version compatibility for the library core.
+    name: Viewer extras resolve
+    runs-on: ubuntu-latest
+    env:
+      MPLBACKEND: Agg
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package with viewer + test extras
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[viewer,test]"
+
+      - name: Run viewer smoke tests
+        run: pytest tests/viewer/ -q
