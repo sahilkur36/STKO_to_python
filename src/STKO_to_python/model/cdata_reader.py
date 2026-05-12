@@ -29,11 +29,12 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from functools import cached_property
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Optional, Sequence, Union
 
 import numpy as np
 
 from .cdata_format import CDataFormatPolicy
+from .transforms import quaternion_to_rotation_matrix
 
 
 if TYPE_CHECKING:
@@ -260,6 +261,73 @@ class CDataReader:
         to the underlying cross-section geometry.
         """
         return self._parse_all_files()["beam_profile_assignments"]
+
+    # ------------------------------------------------------------------ #
+    # Rotation matrices derived from local_axes
+    # ------------------------------------------------------------------ #
+
+    def rotation_matrix(self, element_id: int) -> np.ndarray:
+        """Local-to-global rotation matrix for one element.
+
+        Args:
+            element_id: Element id; must have a ``*LOCAL_AXES`` entry.
+
+        Returns:
+            Shape ``(3, 3)`` ``float`` matrix. Applying it to a vector
+            in the element-local frame yields the same vector in global
+            coordinates: ``v_global = R @ v_local``.
+
+        Raises:
+            KeyError: If the element has no recorded local axes.
+        """
+        eid = int(element_id)
+        try:
+            q = self.local_axes[eid]
+        except KeyError:
+            raise KeyError(
+                f"Element {eid} has no *LOCAL_AXES entry in the .cdata file."
+            ) from None
+        return quaternion_to_rotation_matrix(q)
+
+    def rotation_matrices(
+        self,
+        element_ids: Optional[Sequence[int]] = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Local-to-global rotation matrices for many elements at once.
+
+        Args:
+            element_ids: Subset of element ids to extract. If ``None``,
+                every element with a ``*LOCAL_AXES`` entry is returned,
+                sorted by id.
+
+        Returns:
+            ``(ids, R)`` where ``ids`` is an ``int64`` array of shape
+            ``(N,)`` and ``R`` is a ``float`` array of shape
+            ``(N, 3, 3)`` aligned to ``ids`` row-for-row. Apply via
+            ``v_global[k] = R[k] @ v_local[k]`` per element.
+
+        Raises:
+            KeyError: If any requested id is missing from ``local_axes``;
+                the message lists up to five missing ids for context.
+        """
+        axes = self.local_axes
+        if element_ids is None:
+            ids = np.array(sorted(axes.keys()), dtype=np.int64)
+        else:
+            ids = np.asarray(list(element_ids), dtype=np.int64).ravel()
+            missing = [int(e) for e in ids if int(e) not in axes]
+            if missing:
+                preview = ", ".join(str(m) for m in missing[:5])
+                more = f" (and {len(missing) - 5} more)" if len(missing) > 5 else ""
+                raise KeyError(
+                    f"No *LOCAL_AXES entry for elements: {preview}{more}"
+                )
+
+        if ids.size == 0:
+            return ids, np.empty((0, 3, 3), dtype=float)
+
+        quats = np.stack([axes[int(e)] for e in ids])
+        return ids, quaternion_to_rotation_matrix(quats)
 
     # ------------------------------------------------------------------ #
     # Selection-set surface (eager from MPCODataSet.__init__)

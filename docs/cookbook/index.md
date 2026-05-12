@@ -18,6 +18,7 @@ workflows the library is built around. Each tutorial:
 | 5 | [Element selector + mask pipeline](05-selector-and-mask-pipeline.md) | `elasticFrame/elasticFrame_mesh_displacementBased_results` | `64-DispBeamColumn3d` |
 | 6 | [Node selector + mask pipeline](06-node-selector-and-mask-pipeline.md) | `elasticFrame/elasticFrame_mesh_displacementBased_results` | (node-side; any element family) |
 | 7 | [Select by STKO geometry and property name](07-select-by-geometry-and-property.md) | `elasticFrame/QuadFrame_results` | `203-ASDShellQ4` + `5-ElasticBeam3d` |
+| 8 | [Rotate beam-local forces to global](08-rotate-beam-forces-to-global.md) | `elasticFrame/elasticFrame_mesh_results` | `5-ElasticBeam3d` |
 
 For broader tours of the API on a single fixture see the
 [Examples](../examples/usage_tour.md) section. For the reference
