@@ -21,6 +21,7 @@ Covers:
    12. Integration-point extraction (at_ip, gp_xi, physical_x).
    13. Dataset introspection print helpers.
    14. Element result discovery workflow (full pattern).
+   15. The ``with MPCODataSet(...) as ds:`` context-manager form.
 
 Run with::
 
@@ -337,6 +338,40 @@ def section_14_print_helpers(ds: MPCODataSet) -> None:
     print("ds.print_selection_set_info()   -> named selection sets from .cdata")
 
 
+def section_15_context_manager(dataset_dir: Path, recorder: str) -> None:
+    """Demonstrate the ``with MPCODataSet(...) as ds:`` form.
+
+    Closes pooled HDF5 handles and drops the query-engine LRU caches
+    deterministically at scope exit. Useful for batch scripts that
+    open many datasets in sequence, or when another process is about
+    to rewrite the .mpco files.
+    """
+    section("15. Context-manager form (with MPCODataSet(...) as ds:)")
+
+    with MPCODataSet(str(dataset_dir), recorder, verbose=False) as ds:
+        # Inside the with-block, ds behaves identically to a bare
+        # MPCODataSet — same attributes, same methods.
+        nr = ds.nodes.get_nodal_results(
+            results_name="DISPLACEMENT",
+            model_stage=ds.model_stages[0],
+            node_ids=ds.nodes_info["dataframe"]["node_id"].head(2).tolist(),
+        )
+        print(f"inside `with`: fetched {nr.df.shape[0]} rows")
+        # The engine has one cached result now; __exit__ will clear it.
+        print(
+            "engine cache before exit: "
+            f"{ds._nodal_query_engine.cached_result_count} entry"
+        )
+
+    # __exit__ has run by this point: pool handles closed, LRU dropped.
+    print(
+        "engine cache after exit:  "
+        f"{ds._nodal_query_engine.cached_result_count} entries"
+    )
+    print("ds is still usable (re-opens partitions on next fetch), but")
+    print("the deterministic teardown is the point of the `with` form.")
+
+
 # ---------------------------------------------------------------------- #
 # Entry point
 # ---------------------------------------------------------------------- #
@@ -358,6 +393,7 @@ def run(dataset_dir: Path, recorder: str) -> None:
     section_12_canonical_names(ds)
     section_13_integration_points(ds)
     section_14_print_helpers(ds)
+    section_15_context_manager(dataset_dir, recorder)
 
     print()
     print("Tour complete.")
