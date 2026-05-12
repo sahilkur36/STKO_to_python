@@ -16,6 +16,60 @@ _Nothing pending._
 
 ---
 
+## [1.4.0] — 2026-05-12
+
+Turns the v1.3.0 `*LOCAL_AXES` parsing into a usable rotation:
+public `quaternion_to_rotation_matrix` helper and reader-side
+conveniences. Round-trips ``localForce`` against the
+OpenSees-emitted ``force`` (global) recorder to machine precision
+on the bundled fixture.
+
+### Added
+
+- **`STKO_to_python.quaternion_to_rotation_matrix(q)`** — pure-numpy
+  helper accepting a single quaternion (shape `(4,)`) or a batch
+  (`(N, 4)`) in `(qw, qx, qy, qz)` order and returning the
+  corresponding `(3, 3)` / `(N, 3, 3)` rotation matrix. Normalizes
+  the input internally so STKO's 6-digit quaternions still produce
+  an exactly orthogonal matrix. Convention: `v_global = R @ v_local`
+  ([#65](https://github.com/nmorabowen/STKO_to_python/pull/65)).
+- **`CDataReader.rotation_matrix(element_id)`** — convenience
+  wrapping the `local_axes` lookup + `quaternion_to_rotation_matrix`
+  for a single element ([#65](https://github.com/nmorabowen/STKO_to_python/pull/65)).
+- **`CDataReader.rotation_matrices(element_ids=None)`** — batched
+  version returning `(ids: (N,), R: (N, 3, 3))` aligned row-for-row.
+  Powers vectorized rotation of `(n_steps, n_elements, 3)` arrays
+  via `np.einsum`
+  ([#65](https://github.com/nmorabowen/STKO_to_python/pull/65)).
+- New module `STKO_to_python.model.transforms` housing the
+  rotation utilities ([#65](https://github.com/nmorabowen/STKO_to_python/pull/65)).
+- Cookbook recipe [08 — Rotate beam-local forces and moments to the
+  global frame](docs/cookbook/08-rotate-beam-forces-to-global.md).
+  Demonstrates the round-trip end-to-end against the
+  `elasticFrame_mesh_results` fixture and includes a vectorized
+  batch-rotation pattern.
+
+### Fixed
+
+- Two broken cross-references in `docs/selector_and_mask_pipeline.md`
+  (`../api/element-results.md` should have been `api/element-results.md`
+  after the file moved to the docs root in [#55](https://github.com/nmorabowen/STKO_to_python/pull/55)).
+  `mkdocs build --strict` was aborting; it now exits clean
+  ([#66](https://github.com/nmorabowen/STKO_to_python/pull/66)).
+
+### Test coverage
+
+- 10 new unit tests for `quaternion_to_rotation_matrix` (identity,
+  180° rotations, batched/single equivalence, orthogonality,
+  off-unit-input normalization, conjugate inverse, error paths).
+- 7 new unit tests for the reader convenience methods plus a real
+  fixture round-trip that rotates `localForce` and verifies it
+  matches `force` to machine precision on both a column (non-trivial
+  rotation) and a beam (identity rotation).
+- Total unit suite: **630 passed**, 1 pre-existing skip.
+
+---
+
 ## [1.3.0] — 2026-05-11
 
 Adds full parsing of the `.cdata` sidecar file (every section, not just
@@ -163,7 +217,8 @@ transparently.
 
 See `git log --merges v1.0.0` for the full pre-1.0 history.
 
-[Unreleased]: https://github.com/nmorabowen/STKO_to_python/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/nmorabowen/STKO_to_python/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/nmorabowen/STKO_to_python/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/nmorabowen/STKO_to_python/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/nmorabowen/STKO_to_python/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/nmorabowen/STKO_to_python/compare/v1.0.0...v1.1.0
