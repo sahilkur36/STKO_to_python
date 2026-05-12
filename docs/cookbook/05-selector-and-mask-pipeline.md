@@ -5,6 +5,13 @@
 > threshold, then plot the survivors. Demonstrates the
 > chainable-selector + result-mask pipeline end-to-end.
 
+!!! tip "Looking for the full reference?"
+    This is the recipe-style introduction. For exhaustive coverage of
+    every primitive, every reduction, the full time-spec grammar, the
+    boolean-algebra universe rules, error messages you'll encounter,
+    and performance notes, see the
+    [**Selector + mask pipeline — complete guide**](../selector_and_mask_pipeline.md).
+
 The new pipeline has two layers, executed in this order:
 
 1. **`ds.elements.select()` — pre-fetch.** Chainable, lazy queries

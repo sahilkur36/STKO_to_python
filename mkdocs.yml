@@ -96,6 +96,7 @@ nav:
       - NodalResults: NodalResults.md
       - ElementResults: ElementResults.md
       - Elements workflow: elements_guide.md
+      - Selector + mask pipeline: selector_and_mask_pipeline.md
   - Cookbook:
       - Overview: cookbook/index.md
       - Base shear from column forces: cookbook/01-base-shear-from-column-forces.md
