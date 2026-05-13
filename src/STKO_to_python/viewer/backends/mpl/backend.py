@@ -78,9 +78,29 @@ class MplBackend:
     # ----- Scene lifecycle ------------------------------------------- #
 
     def make_scene(
-        self, *, is_3d: bool = False, off_screen: bool = False,
+        self,
+        *,
+        is_3d: bool = False,
+        off_screen: bool = False,
+        ax: Axes | None = None,
     ) -> MplSceneHandle:
-        """Allocate a new ``Figure`` + ``Axes`` for the scene."""
+        """Allocate (or borrow) a ``Figure`` + ``Axes`` for the scene.
+
+        The optional ``ax`` argument is a backend-specific extension
+        beyond the :class:`Backend` protocol — when supplied, the
+        backend wraps the caller's axes instead of creating a new
+        figure. This is the path the legacy ``Plot.*`` rewires take
+        to honour their ``ax=`` kwarg: callers that pass their own
+        axes get a scene that draws into those axes, without an extra
+        figure showing up.
+
+        The caller is responsible for ensuring ``ax``'s projection
+        matches ``is_3d`` — the backend trusts what it is given.
+        """
+        if ax is not None:
+            return MplSceneHandle(
+                fig=ax.figure, ax=ax, is_3d=is_3d, off_screen=off_screen,
+            )
         if is_3d:
             fig = plt.figure()
             ax = fig.add_subplot(111, projection="3d")

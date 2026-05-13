@@ -38,6 +38,12 @@ class Scene:
             a window — used by the headless CLI and CI snapshots.
         style: Scene-wide style. Defaults to a fresh
             :class:`SceneStyle()`.
+        handle: Optional pre-allocated backend handle. When supplied,
+            the scene **borrows** it — :meth:`Backend.make_scene` and
+            :meth:`Backend.set_style` are skipped. Used by the legacy
+            ``Plot.*`` rewires to thread a caller-supplied matplotlib
+            ``Axes`` through the scene machinery without mutating
+            global rcParams via the default style application.
 
     The opaque :attr:`handle` is allocated lazily on first access so
     that constructing a Scene does not yet require a renderer to be
@@ -53,20 +59,26 @@ class Scene:
         is_3d: bool = False,
         off_screen: bool = False,
         style: SceneStyle | None = None,
+        handle: "SceneHandle | None" = None,
     ) -> None:
         self.backend = backend
         self.source = source
         self.is_3d = is_3d
         self.style = style if style is not None else SceneStyle()
         self.layers: list["Layer"] = []
-        self._handle: "SceneHandle | None" = None
+        self._handle: "SceneHandle | None" = handle
         self._off_screen = off_screen
         self._current_step: int | None = None
         self._current_stage: str | None = None
 
     @property
     def handle(self) -> "SceneHandle":
-        """Backend-allocated scene handle. Created on first access."""
+        """Backend-allocated scene handle. Created on first access.
+
+        If a handle was passed to the constructor, it is returned
+        without invoking the backend; otherwise it is allocated lazily
+        on first access and the scene style is applied.
+        """
         if self._handle is None:
             self._handle = self.backend.make_scene(
                 is_3d=self.is_3d, off_screen=self._off_screen,
