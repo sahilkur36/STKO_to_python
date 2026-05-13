@@ -23,6 +23,7 @@ smoke test (``tests/viewer/test_smoke.py``) keeps that contract honest.
 """
 from __future__ import annotations
 
+from ._mpco_adapter import MPCODataSourceAdapter
 from .backend import Backend
 from .datasource import DataSource
 from .errors import BackendCapabilityError, LayerAttachError
@@ -42,6 +43,7 @@ __all__ = [
     "Layer",
     "LayerAttachError",
     "LayerStyle",
+    "MPCODataSourceAdapter",
     "Scene",
     "SceneHandle",
     "SceneStyle",
