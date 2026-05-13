@@ -13,13 +13,26 @@ Anything else with a known node count falls back to a "convex polygon"
 edge loop (n edges connecting consecutive nodes); higher-order solids
 that don't fit one of the cases above are skipped with a warning.
 
+**Phase 2.5 internals.** As of v1.11, both :func:`plot_deformed_shape`
+and :func:`plot_undeformed_shape` flow their rendering through the
+viewer's ``Scene + Layer + Backend`` machinery
+(:class:`~STKO_to_python.viewer.layers.DeformedMeshLayer` /
+:class:`~STKO_to_python.viewer.layers.MeshLayer` over
+:class:`~STKO_to_python.viewer.backends.mpl.backend.MplBackend`).
+Public signatures, returns, and visual output are unchanged. The
+private helpers (:func:`_build_segments`, :func:`_decide_3d`,
+:func:`_autoscale_axes`, :func:`_displacement_at_step`) stay here for
+now because both the layer code and the v1.x companions
+(:func:`plot_beam_solids_deformed`) import them; they relocate to
+:mod:`viewer.math` in a later phase. See ``docs/viewer/00-roadmap.md``
+Phase 2.5.
+
 The public entry points sit on :class:`STKO_to_python.plotting.plot.Plot`
 (``ds.plot.deformed_shape`` / ``ds.plot.undeformed_shape``); this module
 is the implementation, not the user-facing API.
 """
 from __future__ import annotations
 
-import warnings
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -313,94 +326,63 @@ def plot_deformed_shape(
         * ``is_3d`` — whether the axes are 3D
         * ``scale``, ``step``, ``model_stage``
     """
+    from ..viewer.backends.mpl.backend import MplBackend
+    from ..viewer.core import MPCODataSourceAdapter, Scene
+    from ..viewer.layers import DeformedMeshLayer, MeshLayer
+
     df_nodes = dataset.nodes_info["dataframe"]
     df_elements = dataset.elements_info["dataframe"]
     if df_nodes.empty or df_elements.empty:
         raise ValueError("Dataset has no nodes or no elements to draw.")
 
-    original = {
-        int(row.node_id): np.array([row.x, row.y, row.z], dtype=np.float64)
-        for row in df_nodes.itertuples(index=False)
-    }
-
-    if scale == 0.0 or step is None:
-        deformed = {nid: xyz.copy() for nid, xyz in original.items()}
-    else:
-        disp = _displacement_at_step(
-            dataset, model_stage=model_stage, step=int(step)
-        )
-        deformed = {}
-        for nid, xyz in original.items():
-            d = disp.get(nid)
-            if d is None:
-                deformed[nid] = xyz.copy()
-            else:
-                deformed[nid] = xyz + float(scale) * d
-
     is_3d = _decide_3d(df_elements, df_nodes)
 
-    # ------------------------------------------------------------------ #
-    # axes
-    # ------------------------------------------------------------------ #
-    if ax is None:
-        import matplotlib.pyplot as plt
-
-        if is_3d:
-            fig = plt.figure()
-            ax = fig.add_subplot(111, projection="3d")
-        else:
-            fig, ax = plt.subplots()
-
-    # ------------------------------------------------------------------ #
-    # build segments
-    # ------------------------------------------------------------------ #
-    deformed_segs, edges_per_class, skipped = _build_segments(
-        df_elements=df_elements, coord_lookup=deformed
-    )
+    # Phase 2.5 rewire — undeformed overlay rides on MeshLayer, the
+    # deformed mesh on DeformedMeshLayer. The handle is pre-allocated
+    # so the caller-supplied ``ax`` is honoured and the default
+    # SceneStyle is **not** applied (would mutate plt.rcParams as a
+    # side effect; the v1.x renderer never did that).
+    backend = MplBackend()
+    handle = backend.make_scene(is_3d=is_3d, ax=ax)
+    source = MPCODataSourceAdapter(dataset)
+    scene = Scene(backend, source, is_3d=is_3d, handle=handle)
 
     if show_undeformed:
-        und_segs, _, _ = _build_segments(
-            df_elements=df_elements, coord_lookup=original
+        undeformed_layer = MeshLayer(
+            edge_color=undeformed_color,
+            linewidth=undeformed_linewidth,
+            alpha=undeformed_alpha,
+            mpl_zorder=1.0,
         )
-        for label, segs in und_segs.items():
-            _draw_segments(
-                ax,
-                segs,
-                is_3d=is_3d,
-                color=undeformed_color,
-                linewidth=undeformed_linewidth,
-                alpha=undeformed_alpha,
-                zorder=1.0,
-            )
+        scene.add(undeformed_layer)
 
-    seg_count = 0
-    for label, segs in deformed_segs.items():
-        _draw_segments(
-            ax,
-            segs,
-            is_3d=is_3d,
-            color=color,
-            linewidth=linewidth,
-            alpha=alpha,
-            zorder=2.0,
-        )
-        seg_count += int(segs.shape[0])
-
-    if skipped:
-        warnings.warn(
-            "[deformed_shape] Skipped element classes with unsupported "
-            f"topology: {skipped}",
-            RuntimeWarning,
-        )
-
-    # ------------------------------------------------------------------ #
-    # framing
-    # ------------------------------------------------------------------ #
-    coord_stack = np.vstack(
-        [np.stack(list(deformed.values())), np.stack(list(original.values()))]
-        if show_undeformed
-        else [np.stack(list(deformed.values()))]
+    deformed_layer = DeformedMeshLayer(
+        model_stage=model_stage,
+        step=int(step) if step is not None else None,
+        scale=float(scale),
+        edge_color=color,
+        linewidth=linewidth,
+        alpha=alpha,
+        mpl_zorder=2.0,
     )
+    scene.add(deformed_layer)
+
+    # Framing — keep the v1.x behaviour of including BOTH the deformed
+    # and original coords when ``show_undeformed`` is on, so the bbox
+    # accommodates the entire motion path.
+    deformed = deformed_layer.deformed_coords
+    original = deformed_layer.original_coords
+    if show_undeformed:
+        coord_stack = np.vstack(
+            [
+                np.stack(list(deformed.values())),
+                np.stack(list(original.values())),
+            ]
+        )
+    else:
+        coord_stack = np.stack(list(deformed.values()))
+
+    ax = handle.ax
     _autoscale_axes(ax, coord_stack, is_3d=is_3d)
 
     if not is_3d:
@@ -417,9 +399,9 @@ def plot_deformed_shape(
     meta: Dict[str, Any] = {
         "deformed_coords": deformed,
         "original_coords": original,
-        "edges_per_class": edges_per_class,
-        "segment_count": seg_count,
-        "skipped_classes": skipped,
+        "edges_per_class": deformed_layer.edges_per_class,
+        "segment_count": deformed_layer.segment_count,
+        "skipped_classes": deformed_layer.skipped_classes,
         "is_3d": is_3d,
         "scale": float(scale),
         "step": int(step) if step is not None else None,
@@ -442,49 +424,41 @@ def plot_undeformed_shape(
     Equivalent to :func:`plot_deformed_shape` with ``scale=0`` and
     ``show_undeformed=False``, but without fetching DISPLACEMENT.
     """
+    from ..viewer.backends.mpl.backend import MplBackend
+    from ..viewer.core import MPCODataSourceAdapter, Scene
+    from ..viewer.layers import MeshLayer
+
     df_nodes = dataset.nodes_info["dataframe"]
     df_elements = dataset.elements_info["dataframe"]
     if df_nodes.empty or df_elements.empty:
         raise ValueError("Dataset has no nodes or no elements to draw.")
 
+    is_3d = _decide_3d(df_elements, df_nodes)
+
+    # Phase 2.5 rewire — undeformed mesh through MeshLayer. The legacy
+    # _draw_segments default zorder is 2.0, so we override MeshLayer's
+    # default (1.0) to preserve the v1.x z-stack.
+    backend = MplBackend()
+    handle = backend.make_scene(is_3d=is_3d, ax=ax)
+    source = MPCODataSourceAdapter(dataset)
+    scene = Scene(backend, source, is_3d=is_3d, handle=handle)
+
+    layer = MeshLayer(
+        edge_color=color,
+        linewidth=linewidth,
+        alpha=alpha,
+        mpl_zorder=2.0,
+    )
+    scene.add(layer)
+
+    # Build the ``original_coords`` dict the meta surface promises.
     original = {
         int(row.node_id): np.array([row.x, row.y, row.z], dtype=np.float64)
         for row in df_nodes.itertuples(index=False)
     }
-    is_3d = _decide_3d(df_elements, df_nodes)
-
-    if ax is None:
-        import matplotlib.pyplot as plt
-
-        if is_3d:
-            fig = plt.figure()
-            ax = fig.add_subplot(111, projection="3d")
-        else:
-            fig, ax = plt.subplots()
-
-    segs_per_class, edges_per_class, skipped = _build_segments(
-        df_elements=df_elements, coord_lookup=original
-    )
-    seg_count = 0
-    for label, segs in segs_per_class.items():
-        _draw_segments(
-            ax,
-            segs,
-            is_3d=is_3d,
-            color=color,
-            linewidth=linewidth,
-            alpha=alpha,
-        )
-        seg_count += int(segs.shape[0])
-
-    if skipped:
-        warnings.warn(
-            "[undeformed_shape] Skipped element classes with unsupported "
-            f"topology: {skipped}",
-            RuntimeWarning,
-        )
-
     coord_stack = np.stack(list(original.values()))
+
+    ax = handle.ax
     _autoscale_axes(ax, coord_stack, is_3d=is_3d)
 
     if not is_3d:
@@ -499,9 +473,9 @@ def plot_undeformed_shape(
 
     meta: Dict[str, Any] = {
         "original_coords": original,
-        "edges_per_class": edges_per_class,
-        "segment_count": seg_count,
-        "skipped_classes": skipped,
+        "edges_per_class": layer.edges_per_class,
+        "segment_count": layer.n_edges,
+        "skipped_classes": layer.skipped_classes,
         "is_3d": is_3d,
     }
     return ax, meta
