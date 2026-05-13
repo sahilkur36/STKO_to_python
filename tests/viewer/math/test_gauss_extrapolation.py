@@ -23,6 +23,7 @@ from STKO_to_python.viewer.math.gauss_extrapolation import (
     build_extrapolation_matrix,
     extrapolate_per_element,
     extrapolate_to_nodes_averaged,
+    make_gp_nodal_scalars,
     per_element_max_gp_count,
 )
 
@@ -360,3 +361,172 @@ def test_constant_field_round_trips_for_any_constant(c: float) -> None:
     )
     _, nodal = extrapolate_to_nodes_averaged(per_elem)
     np.testing.assert_allclose(nodal, c, atol=1e-9)
+
+
+# --------------------------------------------------------------------- #
+# make_gp_nodal_scalars (Phase 3.0d)                                    #
+# --------------------------------------------------------------------- #
+#
+# Closure factory that adapts the GP-extrapolation pipeline to the
+# scalars contract :class:`ContourLayer` consumes in ``topology="nodal"``
+# mode. The tests below pin three properties:
+#
+#   1. A constant per-step GP field projects to a constant nodal dict.
+#   2. Two elements sharing two nodes have those shared nodes averaged.
+#   3. A step-varying ``gp_values_fn`` produces step-varying dicts via the
+#      same closure — no recompute of the static layout required.
+
+
+# 2×2 Gauss points on the parent quad (n_gp == n_corner == 4 so pinv is
+# the exact inverse).
+_QUAD_GP_2x2 = np.array(
+    [
+        [-_G, -_G],
+        [+_G, -_G],
+        [+_G, +_G],
+        [-_G, +_G],
+    ],
+    dtype=np.float64,
+)
+
+
+def test_make_gp_nodal_scalars_constant_field_yields_constant_dict() -> None:
+    """All four GPs = 7.0 → every corner gets 7.0."""
+    lookup = {
+        1: ("203-ASDShellQ4", np.array([10, 11, 12, 13], dtype=np.int64)),
+    }
+    eidx = np.full(4, 1, dtype=np.int64)
+    scalars_fn = make_gp_nodal_scalars(
+        gp_values_fn=lambda step: np.full(4, 7.0, dtype=np.float64),
+        element_index=eidx,
+        natural_coords=_QUAD_GP_2x2,
+        element_lookup=lookup,
+    )
+    out = scalars_fn(0)
+    assert set(out.keys()) == {10, 11, 12, 13}
+    for nid, value in out.items():
+        assert value == pytest.approx(7.0)
+
+
+def test_make_gp_nodal_scalars_shared_corners_averaged() -> None:
+    """Two quads sharing nodes 11 and 12 — shared corners get the mean."""
+    # Element 1 corners: 10, 11, 12, 13
+    # Element 2 corners: 11, 14, 15, 12
+    # Constant fields per element: e1 = 1.0, e2 = 3.0
+    lookup = {
+        1: ("203-ASDShellQ4", np.array([10, 11, 12, 13], dtype=np.int64)),
+        2: ("203-ASDShellQ4", np.array([11, 14, 15, 12], dtype=np.int64)),
+    }
+    eidx = np.concatenate([np.full(4, 1), np.full(4, 2)]).astype(np.int64)
+    nat = np.vstack([_QUAD_GP_2x2, _QUAD_GP_2x2])
+    gp_vals = np.concatenate([np.full(4, 1.0), np.full(4, 3.0)]).astype(np.float64)
+    scalars_fn = make_gp_nodal_scalars(
+        gp_values_fn=lambda step: gp_vals,
+        element_index=eidx,
+        natural_coords=nat,
+        element_lookup=lookup,
+    )
+    out = scalars_fn(0)
+    assert out[10] == pytest.approx(1.0)
+    assert out[13] == pytest.approx(1.0)
+    assert out[14] == pytest.approx(3.0)
+    assert out[15] == pytest.approx(3.0)
+    # Shared corners average the two contributing element values.
+    assert out[11] == pytest.approx(2.0)
+    assert out[12] == pytest.approx(2.0)
+
+
+def test_make_gp_nodal_scalars_step_varying_callable() -> None:
+    """The closure invokes gp_values_fn every call — step → step yields
+    independent dicts."""
+    lookup = {
+        1: ("203-ASDShellQ4", np.array([10, 11, 12, 13], dtype=np.int64)),
+    }
+    eidx = np.full(4, 1, dtype=np.int64)
+    calls = []
+
+    def gp_values(step):
+        calls.append(int(step))
+        return np.full(4, float(step), dtype=np.float64)
+
+    scalars_fn = make_gp_nodal_scalars(
+        gp_values_fn=gp_values,
+        element_index=eidx,
+        natural_coords=_QUAD_GP_2x2,
+        element_lookup=lookup,
+    )
+    d0 = scalars_fn(0)
+    d5 = scalars_fn(5)
+    for v in d0.values():
+        assert v == pytest.approx(0.0)
+    for v in d5.values():
+        assert v == pytest.approx(5.0)
+    # The closure forwards the step int exactly to the gp_values_fn.
+    assert calls == [0, 5]
+
+
+def test_make_gp_nodal_scalars_empty_lookup_returns_empty_dict() -> None:
+    """An element-lookup that filters every GP out yields an empty dict."""
+    eidx = np.full(4, 1, dtype=np.int64)
+    scalars_fn = make_gp_nodal_scalars(
+        gp_values_fn=lambda step: np.zeros(4, dtype=np.float64),
+        element_index=eidx,
+        natural_coords=_QUAD_GP_2x2,
+        element_lookup={},  # no entry → every GP is dropped
+    )
+    assert scalars_fn(0) == {}
+
+
+def test_make_gp_nodal_scalars_rejects_scalar_input() -> None:
+    """gp_values_fn returning a 0-D scalar is a malformed-input error."""
+    scalars_fn = make_gp_nodal_scalars(
+        gp_values_fn=lambda step: np.asarray(1.0),
+        element_index=np.array([1], dtype=np.int64),
+        natural_coords=np.array([[0.0, 0.0]]),
+        element_lookup={
+            1: ("203-ASDShellQ4", np.array([1, 2, 3, 4], dtype=np.int64)),
+        },
+    )
+    with pytest.raises(ValueError, match="0-D scalar"):
+        scalars_fn(0)
+
+
+def test_make_gp_nodal_scalars_supports_multistep_batch() -> None:
+    """When gp_values_fn returns a (T, n_total_gp) batch, the closure
+    indexes into it by ``step`` so animations can precompute once and
+    re-index cheaply."""
+    lookup = {
+        1: ("203-ASDShellQ4", np.array([10, 11, 12, 13], dtype=np.int64)),
+    }
+    eidx = np.full(4, 1, dtype=np.int64)
+    # 3 timesteps; step k has all GPs at value k.
+    batch = np.stack([np.full(4, float(k)) for k in range(3)])  # (3, 4)
+
+    scalars_fn = make_gp_nodal_scalars(
+        gp_values_fn=lambda step: batch,
+        element_index=eidx,
+        natural_coords=_QUAD_GP_2x2,
+        element_lookup=lookup,
+    )
+    for k in range(3):
+        d = scalars_fn(k)
+        for v in d.values():
+            assert v == pytest.approx(float(k))
+
+
+def test_make_gp_nodal_scalars_multistep_batch_out_of_range_raises() -> None:
+    """Step outside the precomputed batch range is a hard error, not
+    silent wrap-around."""
+    lookup = {
+        1: ("203-ASDShellQ4", np.array([10, 11, 12, 13], dtype=np.int64)),
+    }
+    eidx = np.full(4, 1, dtype=np.int64)
+    batch = np.stack([np.full(4, float(k)) for k in range(3)])
+    scalars_fn = make_gp_nodal_scalars(
+        gp_values_fn=lambda step: batch,
+        element_index=eidx,
+        natural_coords=_QUAD_GP_2x2,
+        element_lookup=lookup,
+    )
+    with pytest.raises(IndexError, match="out of range"):
+        scalars_fn(99)

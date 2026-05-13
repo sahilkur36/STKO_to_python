@@ -727,3 +727,158 @@ def test_pyvista_backend_polygons_both_values_and_point_values_raises() -> None:
             )
     finally:
         handle.plotter.close()
+
+
+# --------------------------------------------------------------------- #
+# GP-node-extrap-smooth (Phase 3.0d) — end-to-end via make_gp_nodal_scalars
+# --------------------------------------------------------------------- #
+
+
+def test_pyvista_gp_extrap_smooth_end_to_end() -> None:
+    """The Phase 3.0d wiring: GP scalars → make_gp_nodal_scalars →
+    ContourLayer(topology="nodal"). The shared edge between the two quads
+    must carry a single value at each shared corner, even though the two
+    quads contribute different GP fields."""
+    pv = pytest.importorskip("pyvista")
+    from STKO_to_python.viewer.backends.pyvista import PyVistaBackend
+    from STKO_to_python.viewer.math.gauss_extrapolation import (
+        make_gp_nodal_scalars,
+    )
+
+    # Two quads sharing nodes 2 and 3, with constant GP fields per element.
+    # Quad 11 corners: (1, 2, 3, 4) — every GP at value 1.0
+    # Quad 12 corners: (2, 5, 6, 3) — every GP at value 3.0
+    # Shared corners (2, 3) expect (1.0 + 3.0) / 2 = 2.0.
+    g = 1.0 / np.sqrt(3.0)
+    quad_2x2 = np.array(
+        [
+            [-g, -g],
+            [+g, -g],
+            [+g, +g],
+            [-g, +g],
+        ],
+        dtype=np.float64,
+    )
+    eidx = np.concatenate([np.full(4, 11), np.full(4, 12)]).astype(np.int64)
+    nat = np.vstack([quad_2x2, quad_2x2])
+    gp_values_const = np.concatenate(
+        [np.full(4, 1.0), np.full(4, 3.0)]
+    ).astype(np.float64)
+
+    scalars_fn = make_gp_nodal_scalars(
+        gp_values_fn=lambda step: gp_values_const,
+        element_index=eidx,
+        natural_coords=nat,
+        element_lookup={
+            11: ("203-ASDShellQ4", np.array([1, 2, 3, 4], dtype=np.int64)),
+            12: ("203-ASDShellQ4", np.array([2, 5, 6, 3], dtype=np.int64)),
+        },
+    )
+
+    # Pre-flight: the closure produces the expected dict at step 0.
+    nodal_dict = scalars_fn(0)
+    assert nodal_dict[1] == pytest.approx(1.0)
+    assert nodal_dict[4] == pytest.approx(1.0)
+    assert nodal_dict[5] == pytest.approx(3.0)
+    assert nodal_dict[6] == pytest.approx(3.0)
+    assert nodal_dict[2] == pytest.approx(2.0)
+    assert nodal_dict[3] == pytest.approx(2.0)
+
+    # End-to-end: drive a PyVista ContourLayer through the closure.
+    fake = _make_fake_dataset()
+    backend = PyVistaBackend()
+    handle = backend.make_scene(is_3d=True, off_screen=True)
+    try:
+        source = MPCODataSourceAdapter(fake)
+        scene = Scene(backend, source, is_3d=True, handle=handle)
+        layer = ContourLayer(
+            scalars=scalars_fn,
+            topology="nodal",
+            selection=SelectionSpec(element_type="203-ASDShellQ4"),
+        )
+        scene.add(layer)
+        q4_ref = layer.actors["203-ASDShellQ4(4n)"]
+        # Vertex stream: quad 11 (1,2,3,4) then quad 12 (2,5,6,3).
+        # Expected per-vertex values: 1, 2, 2, 1, 2, 3, 3, 2.
+        np.testing.assert_allclose(
+            q4_ref.dataset.point_data["point_values"],
+            [1.0, 2.0, 2.0, 1.0,    # quad 11
+             2.0, 3.0, 3.0, 2.0],   # quad 12
+        )
+    finally:
+        handle.plotter.close()
+
+
+def test_pyvista_gp_extrap_smooth_step_varying_animates() -> None:
+    """A step-varying gp_values_fn drives in-place point_data mutation on
+    the SAME actor across animation steps."""
+    pv = pytest.importorskip("pyvista")
+    from STKO_to_python.viewer.backends.pyvista import PyVistaBackend
+    from STKO_to_python.viewer.math.gauss_extrapolation import (
+        make_gp_nodal_scalars,
+    )
+
+    g = 1.0 / np.sqrt(3.0)
+    quad_2x2 = np.array(
+        [
+            [-g, -g],
+            [+g, -g],
+            [+g, +g],
+            [-g, +g],
+        ],
+        dtype=np.float64,
+    )
+    eidx = np.concatenate([np.full(4, 11), np.full(4, 12)]).astype(np.int64)
+    nat = np.vstack([quad_2x2, quad_2x2])
+
+    # All GPs of element 11 hold value ``step``; element 12 holds
+    # ``step + 10``. Lets us verify the layer's point_data tracks
+    # update_to_step.
+    def gp_values_at(step):
+        return np.concatenate(
+            [np.full(4, float(step)), np.full(4, float(step) + 10.0)]
+        ).astype(np.float64)
+
+    scalars_fn = make_gp_nodal_scalars(
+        gp_values_fn=gp_values_at,
+        element_index=eidx,
+        natural_coords=nat,
+        element_lookup={
+            11: ("203-ASDShellQ4", np.array([1, 2, 3, 4], dtype=np.int64)),
+            12: ("203-ASDShellQ4", np.array([2, 5, 6, 3], dtype=np.int64)),
+        },
+    )
+
+    fake = _make_fake_dataset()
+    backend = PyVistaBackend()
+    handle = backend.make_scene(is_3d=True, off_screen=True)
+    try:
+        source = MPCODataSourceAdapter(fake)
+        scene = Scene(backend, source, is_3d=True, handle=handle)
+        layer = ContourLayer(
+            scalars=scalars_fn,
+            topology="nodal",
+            step=0,
+            selection=SelectionSpec(element_type="203-ASDShellQ4"),
+        )
+        scene.add(layer)
+        ref_before = layer.actors["203-ASDShellQ4(4n)"]
+        # At step 0 the layer fetched ``gp_values_at(0)``; verify the
+        # corner-1 value (unique to element 11) is 0.0.
+        assert ref_before.dataset.point_data["point_values"][0] == pytest.approx(0.0)
+
+        layer.update_to_step(5)
+        ref_after = layer.actors["203-ASDShellQ4(4n)"]
+        # Same actor instance (apeGmsh perf contract).
+        assert ref_after is ref_before
+        assert layer.current_step == 5
+        # Corner-1 (element 11 only): value at step 5 is 5.0.
+        # Corner-5 (element 12 only): value at step 5 is 15.0.
+        # Corners 2 and 3 (shared): mean = (5.0 + 15.0) / 2 = 10.0.
+        np.testing.assert_allclose(
+            ref_after.dataset.point_data["point_values"],
+            [5.0, 10.0, 10.0, 5.0,
+             10.0, 15.0, 15.0, 10.0],
+        )
+    finally:
+        handle.plotter.close()
