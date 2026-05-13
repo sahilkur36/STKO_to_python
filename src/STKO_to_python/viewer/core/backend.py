@@ -91,11 +91,21 @@ class Backend(Protocol):
         polygons: np.ndarray,
         *,
         values: np.ndarray | None = None,
+        point_values: np.ndarray | None = None,
         cmap: str | None = None,
         edge_color: Any = None,
     ) -> ActorRef:
         """Add filled polygons. ``polygons`` is a ``(N, M, 3)`` array
-        of M-sided polygon vertices, or backend-specific equivalent."""
+        of M-sided polygon vertices, or backend-specific equivalent.
+
+        Exactly one of ``values`` (one scalar per cell) or
+        ``point_values`` (one scalar per vertex of the flattened
+        polygon vertex stream) may be supplied; passing both raises a
+        ``ValueError``. ``point_values`` drives smooth per-vertex
+        coloring (Gouraud-style) and may not be supported by every
+        backend — implementations that lack a per-vertex path raise
+        :class:`STKO_to_python.viewer.core.errors.BackendCapabilityError`.
+        """
 
     def add_arrows(
         self,

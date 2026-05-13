@@ -215,6 +215,7 @@ class MplBackend:
         polygons: Any,
         *,
         values: np.ndarray | None = None,
+        point_values: np.ndarray | None = None,
         cmap: str | None = None,
         edge_color: Any = None,
     ) -> ActorRef:
@@ -223,7 +224,29 @@ class MplBackend:
         ``polygons`` is a sequence of ``(M_i, 3)`` (or ``(M_i, 2)``)
         vertex arrays — one ``M_i``-sided polygon per entry. Matplotlib
         accepts heterogeneous M, so we do not reshape into a tensor.
+
+        Matplotlib's ``PolyCollection`` colors per cell, not per
+        vertex. Supplying ``point_values`` raises
+        :class:`BackendCapabilityError` — per-vertex (Gouraud-style)
+        coloring requires either ``tripcolor`` (2-D triangle mesh
+        only) or a different backend (e.g. PyVista). The 2-D
+        ``tripcolor`` path is a follow-up; callers who need
+        per-vertex coloring on matplotlib today should pre-aggregate
+        to per-cell scalars and pass ``values=`` instead.
         """
+        if values is not None and point_values is not None:
+            raise ValueError(
+                "add_polygons accepts either values= or point_values=, "
+                "not both."
+            )
+        if point_values is not None:
+            raise BackendCapabilityError(
+                "MplBackend.add_polygons does not support per-vertex "
+                "coloring (point_values=). matplotlib's PolyCollection is "
+                "per-cell only; use a different backend (e.g. PyVista) for "
+                "smooth nodal contours, or aggregate the per-node scalars "
+                "to per-cell before calling."
+            )
         kwargs: dict[str, Any] = {}
         if edge_color is not None:
             kwargs["edgecolors"] = edge_color
