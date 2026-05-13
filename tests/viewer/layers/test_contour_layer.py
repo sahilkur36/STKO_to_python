@@ -548,3 +548,182 @@ def test_pyvista_contour_in_place_update_keeps_same_actor() -> None:
         )
     finally:
         handle.plotter.close()
+
+
+# --------------------------------------------------------------------- #
+# Nodal topology (Phase 3.0c)
+# --------------------------------------------------------------------- #
+
+
+def test_topology_rejects_unknown_value() -> None:
+    with pytest.raises(ValueError, match="topology must be"):
+        ContourLayer(scalars={1: 0.0}, topology="bogus")
+
+
+def test_topology_default_is_cell() -> None:
+    layer = ContourLayer(scalars={11: 0.0})
+    assert layer.topology == "cell"
+
+
+def test_nodal_mode_on_mpl_raises_backend_capability_error() -> None:
+    """MplBackend doesn't support per-vertex polygon coloring —
+    nodal contour on mpl must fail loud with a clear message."""
+    from STKO_to_python.viewer.core.errors import BackendCapabilityError
+
+    fake = _make_fake_dataset()
+    scene = _make_scene(fake)
+    # One value per node in the fake dataset (6 nodes).
+    nodal_scalars = {1: 0.0, 2: 0.5, 3: 1.0, 4: 0.5, 5: 0.7, 6: 0.9}
+    layer = ContourLayer(scalars=nodal_scalars, topology="nodal")
+    try:
+        with pytest.raises(BackendCapabilityError, match="per-vertex"):
+            scene.add(layer)
+    finally:
+        plt.close("all")
+
+
+def test_nodal_mode_missing_node_in_scalar_dict_raises() -> None:
+    """Same loud-failure contract as cell mode, but for node ids."""
+    fake = _make_fake_dataset()
+    scene = _make_scene(fake)
+    # Leaves out one of the nodes a rendered face references.
+    nodal_scalars = {1: 0.0, 2: 0.5}  # missing 3, 4, 5, 6
+    layer = ContourLayer(scalars=nodal_scalars, topology="nodal")
+    try:
+        # On mpl the BackendCapabilityError from add_polygons fires first
+        # at the call site; the KeyError contract is exercised by the
+        # PyVista nodal tests below where the path can actually proceed
+        # far enough to evaluate scalars.
+        with pytest.raises(Exception):
+            scene.add(layer)
+    finally:
+        plt.close("all")
+
+
+def test_pyvista_nodal_contour_binds_point_data() -> None:
+    """PyVista path stores per-vertex scalars in point_data, not cell_data."""
+    pv = pytest.importorskip("pyvista")
+    from STKO_to_python.viewer.backends.pyvista import PyVistaBackend
+    from STKO_to_python.viewer.backends.pyvista.backend import _PvActorRef
+
+    fake = _make_fake_dataset()
+    backend = PyVistaBackend()
+    handle = backend.make_scene(is_3d=True, off_screen=True)
+    try:
+        source = MPCODataSourceAdapter(fake)
+        scene = Scene(backend, source, is_3d=True, handle=handle)
+
+        nodal = {1: 0.0, 2: 1.0, 3: 2.0, 4: 3.0, 5: 4.0, 6: 5.0}
+        layer = ContourLayer(scalars=nodal, topology="nodal")
+        scene.add(layer)
+
+        # The Q4 class: two quads share an edge (nodes 2,3). Vertex stream
+        # is the flattened concat of each face's 4 corners.
+        # Quad 11 (1,2,3,4) -> [0.0, 1.0, 2.0, 3.0]
+        # Quad 12 (2,5,6,3) -> [1.0, 4.0, 5.0, 2.0]
+        q4_ref = layer.actors["203-ASDShellQ4(4n)"]
+        assert isinstance(q4_ref, _PvActorRef)
+        assert q4_ref.scalar_field == "point_values"
+        np.testing.assert_allclose(
+            q4_ref.dataset.point_data["point_values"],
+            [0.0, 1.0, 2.0, 3.0,    # quad 11
+             1.0, 4.0, 5.0, 2.0],   # quad 12
+        )
+        # Shared corner node 2 contributed identical values (1.0) to both
+        # quads — that's what makes the rendering visually continuous.
+    finally:
+        handle.plotter.close()
+
+
+def test_pyvista_nodal_contour_in_place_update() -> None:
+    """update_scalars must dispatch to point_data, not cell_data."""
+    pv = pytest.importorskip("pyvista")
+    from STKO_to_python.viewer.backends.pyvista import PyVistaBackend
+
+    fake = _make_fake_dataset()
+    backend = PyVistaBackend()
+    handle = backend.make_scene(is_3d=True, off_screen=True)
+    try:
+        source = MPCODataSourceAdapter(fake)
+        scene = Scene(backend, source, is_3d=True, handle=handle)
+
+        def scalars_at(step):
+            base = float(step)
+            return {1: base, 2: base + 1, 3: base + 2,
+                    4: base + 3, 5: base + 4, 6: base + 5}
+
+        layer = ContourLayer(scalars=scalars_at, topology="nodal", step=0)
+        scene.add(layer)
+        ref_before = layer.actors["203-ASDShellQ4(4n)"]
+        layer.update_to_step(10)
+        ref_after = layer.actors["203-ASDShellQ4(4n)"]
+        assert ref_after is ref_before  # actor preserved
+        assert layer.current_step == 10
+        # cell_data MUST be untouched; point_data has the new step-10 values.
+        assert "values" not in ref_after.dataset.cell_data
+        # Step 10 quad 11 (1,2,3,4): 10, 11, 12, 13
+        np.testing.assert_allclose(
+            ref_after.dataset.point_data["point_values"][:4],
+            [10.0, 11.0, 12.0, 13.0],
+        )
+    finally:
+        handle.plotter.close()
+
+
+def test_pyvista_nodal_contour_clim_autofreezes_to_data_range() -> None:
+    pv = pytest.importorskip("pyvista")
+    from STKO_to_python.viewer.backends.pyvista import PyVistaBackend
+
+    fake = _make_fake_dataset()
+    backend = PyVistaBackend()
+    handle = backend.make_scene(is_3d=True, off_screen=True)
+    try:
+        source = MPCODataSourceAdapter(fake)
+        scene = Scene(backend, source, is_3d=True, handle=handle)
+        nodal = {1: -2.0, 2: 0.0, 3: 5.0, 4: 1.0, 5: 3.0, 6: 7.0}
+        layer = ContourLayer(scalars=nodal, topology="nodal")
+        scene.add(layer)
+        vmin, vmax = layer.clim
+        assert vmin == pytest.approx(-2.0)
+        assert vmax == pytest.approx(7.0)
+    finally:
+        handle.plotter.close()
+
+
+def test_pyvista_nodal_contour_missing_node_raises() -> None:
+    pv = pytest.importorskip("pyvista")
+    from STKO_to_python.viewer.backends.pyvista import PyVistaBackend
+
+    fake = _make_fake_dataset()
+    backend = PyVistaBackend()
+    handle = backend.make_scene(is_3d=True, off_screen=True)
+    try:
+        source = MPCODataSourceAdapter(fake)
+        scene = Scene(backend, source, is_3d=True, handle=handle)
+        layer = ContourLayer(
+            scalars={1: 0.0, 2: 1.0},  # 3-6 missing
+            topology="nodal",
+        )
+        with pytest.raises(KeyError, match="node id"):
+            scene.add(layer)
+    finally:
+        handle.plotter.close()
+
+
+def test_pyvista_backend_polygons_both_values_and_point_values_raises() -> None:
+    """The protocol forbids supplying both at once."""
+    pv = pytest.importorskip("pyvista")
+    from STKO_to_python.viewer.backends.pyvista import PyVistaBackend
+
+    backend = PyVistaBackend()
+    handle = backend.make_scene(is_3d=True, off_screen=True)
+    try:
+        tri = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+        with pytest.raises(ValueError, match="not both"):
+            backend.add_polygons(
+                handle, [tri],
+                values=np.array([1.0]),
+                point_values=np.array([0.0, 1.0, 2.0]),
+            )
+    finally:
+        handle.plotter.close()

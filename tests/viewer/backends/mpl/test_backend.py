@@ -251,6 +251,29 @@ def test_add_polygons_with_values_sets_array(
     np.testing.assert_array_equal(actor.get_array(), values)
 
 
+def test_add_polygons_with_point_values_raises_capability_error(
+    backend: MplBackend, scene_2d: MplSceneHandle,
+) -> None:
+    """matplotlib's PolyCollection is per-cell only — per-vertex coloring
+    must fail loud, not silently swallow the request."""
+    polys = [np.array([[0, 0], [1, 0], [1, 1], [0, 1]], dtype=np.float64)]
+    with pytest.raises(BackendCapabilityError, match="per-vertex"):
+        backend.add_polygons(scene_2d, polys, point_values=np.array([0.0, 1.0, 2.0, 3.0]))
+
+
+def test_add_polygons_with_both_values_and_point_values_raises(
+    backend: MplBackend, scene_2d: MplSceneHandle,
+) -> None:
+    """Passing both forms is a protocol-level error, regardless of backend."""
+    polys = [np.array([[0, 0], [1, 0], [1, 1], [0, 1]], dtype=np.float64)]
+    with pytest.raises(ValueError, match="not both"):
+        backend.add_polygons(
+            scene_2d, polys,
+            values=np.array([1.0]),
+            point_values=np.array([0.0, 1.0, 2.0, 3.0]),
+        )
+
+
 # --------------------------------------------------------------------- #
 # add_arrows                                                            #
 # --------------------------------------------------------------------- #

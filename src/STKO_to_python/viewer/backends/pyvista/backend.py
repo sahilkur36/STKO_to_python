@@ -290,6 +290,7 @@ class PyVistaBackend:
         polygons: Any,
         *,
         values: np.ndarray | None = None,
+        point_values: np.ndarray | None = None,
         cmap: str | None = None,
         edge_color: Any = None,
     ) -> ActorRef:
@@ -298,9 +299,19 @@ class PyVistaBackend:
         ``polygons`` is a sequence of ``(M_i, 3)`` vertex arrays —
         one M-sided polygon per entry. Heterogeneous ``M_i`` is
         supported via VTK's variable-length face encoding.
-        Per-cell ``values`` are stored in ``cell_data["values"]``;
-        :meth:`update_scalars` writes into the same name.
+
+        ``values`` (per-cell) is stored in ``cell_data["values"]``;
+        ``point_values`` (per-vertex, in the same flattened order as
+        the concatenated polygon vertex stream) is stored in
+        ``point_data["point_values"]``. Passing both is a
+        ``ValueError``. :meth:`update_scalars` writes into whichever
+        field is bound — caller doesn't need to remember which.
         """
+        if values is not None and point_values is not None:
+            raise ValueError(
+                "add_polygons accepts either values= or point_values=, "
+                "not both."
+            )
         polys_list = list(polygons) if not isinstance(polygons, list) else polygons
         if not polys_list:
             poly = pv.PolyData()
@@ -341,6 +352,16 @@ class PyVistaBackend:
             scalar_field = "values"
             poly.cell_data[scalar_field] = np.asarray(values, dtype=np.float64)
             kwargs["scalars"] = scalar_field
+            kwargs["preference"] = "cell"
+            if cmap is not None:
+                kwargs["cmap"] = cmap
+        elif point_values is not None and poly.n_points > 0:
+            scalar_field = "point_values"
+            poly.point_data[scalar_field] = np.asarray(
+                point_values, dtype=np.float64,
+            )
+            kwargs["scalars"] = scalar_field
+            kwargs["preference"] = "point"
             if cmap is not None:
                 kwargs["cmap"] = cmap
         actor = scene.plotter.add_mesh(poly, **kwargs)
@@ -392,9 +413,13 @@ class PyVistaBackend:
     def update_scalars(self, actor: ActorRef, scalars: np.ndarray) -> None:
         """Mutate an actor's scalar field in place.
 
-        Requires the actor was created with a ``scalars=`` argument
-        (which bound the field name at creation time). Arrows have
-        no scalar field — they raise :class:`BackendCapabilityError`.
+        Requires the actor was created with a ``scalars=`` /
+        ``values=`` / ``point_values=`` argument (which bound the
+        field name at creation time). Arrows have no scalar field —
+        they raise :class:`BackendCapabilityError`. The write is
+        dispatched to ``point_data`` or ``cell_data`` explicitly
+        based on where the field was originally bound, so length-
+        equal point and cell arrays never collide.
         """
         ref = self._unwrap(actor)
         if ref.dataset is None or ref.scalar_field is None:
@@ -402,7 +427,17 @@ class PyVistaBackend:
                 f"Actor (kind={ref.kind!r}) does not support scalar updates "
                 "— no scalar field was bound at creation."
             )
-        ref.dataset[ref.scalar_field] = np.asarray(scalars, dtype=np.float64)
+        arr = np.asarray(scalars, dtype=np.float64)
+        field = ref.scalar_field
+        if field in ref.dataset.point_data:
+            ref.dataset.point_data[field] = arr
+        elif field in ref.dataset.cell_data:
+            ref.dataset.cell_data[field] = arr
+        else:
+            # First-time binding via the dataset's __setitem__ dispatch.
+            # Used for the ``points`` kind, whose scalars live on
+            # ``point_data`` from creation.
+            ref.dataset[field] = arr
         ref.dataset.Modified()
 
     def update_points(self, actor: ActorRef, points: np.ndarray) -> None:

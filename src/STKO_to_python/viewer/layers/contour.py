@@ -1,45 +1,49 @@
-"""``ContourLayer`` — per-cell scalar field over the mesh.
+"""``ContourLayer`` — scalar field over the mesh, cell- or nodal-topology.
 
-Renders one filled polygon per element, colored by a caller-supplied
-scalar map. This is the **cell-topology** path of the directive's
-five-path dispatch (per
-``docs/viewer/02-porting-from-apegmsh.md`` §4 / apeGmsh's
-``viewers/diagrams/_contour.py``):
+Renders filled polygons over the model surface, colored by a caller-
+supplied scalar map. Implements two of the five paths from the
+directive (per ``docs/viewer/02-porting-from-apegmsh.md`` §4 /
+apeGmsh's ``viewers/diagrams/_contour.py``):
 
-* **cell** (this layer, Phase 3.0b) — one scalar per element.
-* nodal — one scalar per node; **not yet implemented** (Phase 3.0c
-  with a ``Backend.add_polygons(point_values=...)`` extension).
-* GP-cell-averaged — one scalar per element, computed by averaging
-  per-GP values upstream; same renderer path as ``cell`` here.
+* **cell** (Phase 3.0b) — one scalar per element; rendered through
+  ``backend.add_polygons(values=...)``.
+* **nodal** (Phase 3.0c) — one scalar per node; rendered through
+  ``backend.add_polygons(point_values=...)`` for smooth Gouraud-style
+  interpolation. PyVista native; MplBackend raises
+  :class:`BackendCapabilityError` because matplotlib's
+  ``PolyCollection`` is per-cell only.
+
+The remaining three paths from the directive are upstream
+aggregations of these two:
+
+* GP-cell-averaged — one scalar per element from averaged per-GP
+  values; same renderer path as ``cell``.
 * GP-node-extrap-smooth — extrapolate GPs to nodes via
   :func:`STKO_to_python.viewer.math.gauss_extrapolation.extrapolate_to_nodes_averaged`,
-  then render as nodal. Phase 3.0c.
-* GP-node-discrete — extrapolate per-element, render with
-  discontinuous nodes (each element keeps its own corner copies).
-  Phase 3.0d.
-
-By keeping the layer cell-topology-only this PR avoids extending the
-``Backend.add_polygons`` protocol and bypasses the
-nodal-coloring divergence between matplotlib (no ``PolyCollection``
-per-vertex coloring) and PyVista (native ``point_data``). The
-follow-up PRs add the missing paths once the protocol extension is
-proven on PyVista.
+  then render as ``nodal``. Phase 3.0d.
+* GP-node-discrete — extrapolate per-element, render each element's
+  corner values as a separate discontinuous polygon. Phase 3.0e.
 
 Scalars contract
 ----------------
 
-The caller supplies scalars as either:
+For ``topology="cell"``, the caller supplies scalars as
+``dict[element_id, float]``. For ``topology="nodal"``, the caller
+supplies ``dict[node_id, float]``. In both cases the input is either:
 
-* a **static** ``dict[int, float]`` mapping ``element_id → value`` —
-  the layer is non-time-varying and :meth:`update_to_step` is a
-  no-op;
-* a **callable** ``(step: int) -> dict[int, float]`` invoked at
-  attach (with the initial step) and at every
-  :meth:`update_to_step` — same dict shape, fresh per call.
+* a **static** dict — the layer is non-time-varying and
+  :meth:`update_to_step` is a no-op;
+* a **callable** ``(step: int) -> dict`` invoked at attach (with the
+  initial step) and at every :meth:`update_to_step` — same dict
+  shape, fresh per call.
 
 Both shapes are dict-based on purpose: the caller doesn't need to
-know the renderer's element ordering, and a missing key is a hard
-error (no silent data dropouts).
+know the renderer's element / vertex ordering, and a missing key is
+a hard error (no silent data dropouts). Nodal-mode lookups happen
+per face vertex against the **node** the vertex came from — shared
+nodes across neighbouring faces resolve to the same scalar value,
+which is what makes the rendering visually smooth despite the
+polydata storing duplicated vertices per polygon.
 """
 from __future__ import annotations
 
@@ -105,15 +109,26 @@ ScalarsInput = Mapping[int, float] | Callable[[int], Mapping[int, float]]
 
 
 class ContourLayer(Layer):
-    """Per-cell scalar contour over the model surface.
+    """Scalar contour over the model surface, cell- or nodal-topology.
 
     Parameters
     ----------
     scalars:
-        Either a static ``dict[int, float]`` mapping ``element_id →
-        value`` or a callable ``(step) -> dict[int, float]``. Each
-        rendered element must have an entry; missing keys raise
-        :class:`KeyError`.
+        Either a static ``dict[int, float]`` or a callable
+        ``(step) -> dict[int, float]``. The dict keys are
+        **element ids** when ``topology="cell"`` and **node ids**
+        when ``topology="nodal"``. Each rendered element / node must
+        have an entry; missing keys raise :class:`KeyError`.
+    topology:
+        ``"cell"`` (default) for one scalar per element, rendered
+        through ``backend.add_polygons(values=...)``. ``"nodal"`` for
+        one scalar per node, rendered through
+        ``backend.add_polygons(point_values=...)`` for smooth
+        Gouraud-style interpolation. The nodal path is supported by
+        :class:`~STKO_to_python.viewer.backends.pyvista.PyVistaBackend`;
+        :class:`~STKO_to_python.viewer.backends.mpl.MplBackend` raises
+        :class:`BackendCapabilityError` because
+        ``PolyCollection`` is per-cell only.
     step:
         Initial step. Only consulted when ``scalars`` is a callable —
         the static-dict path ignores it.
@@ -150,7 +165,7 @@ class ContourLayer(Layer):
     -----------------
 
     When ``scalars`` is callable, :meth:`update_to_step` re-invokes
-    it, re-indexes into the rendered-element order, and calls
+    it, re-indexes into the rendered-face order, and calls
     ``backend.update_scalars`` on the existing actors — no actor
     recreation, satisfies the apeGmsh perf contract. When
     ``scalars`` is a static dict, :meth:`update_to_step` is a no-op.
@@ -162,6 +177,7 @@ class ContourLayer(Layer):
         self,
         *,
         scalars: ScalarsInput,
+        topology: str = "cell",
         step: int = 0,
         cmap: str = "viridis",
         clim: tuple[float, float] | None = None,
@@ -175,6 +191,11 @@ class ContourLayer(Layer):
         super().__init__(
             name=name, selection=selection, visible=visible, z_order=z_order,
         )
+        if topology not in ("cell", "nodal"):
+            raise ValueError(
+                f"topology must be 'cell' or 'nodal', got {topology!r}."
+            )
+        self.topology = topology
         self._scalars_input: ScalarsInput = scalars
         self._initial_step = int(step) if step is not None else 0
         self._current_step: int | None = None
@@ -184,10 +205,14 @@ class ContourLayer(Layer):
         self.mpl_zorder = mpl_zorder
 
         # Populated at attach.
-        # Each entry: (label, polygon_vertex_arrays, source_element_ids,
-        # actor). source_element_ids parallels the polygon list per class —
-        # one entry per drawn face. A brick contributes 6 polygon entries
-        # all pointing at its element id.
+        # Each entry: (label, polygons, source_element_ids,
+        # face_node_ids, actor).
+        # - source_element_ids parallels ``polygons`` per class — one
+        #   entry per drawn face. A brick contributes 6 polygon entries
+        #   all pointing at its element id.
+        # - face_node_ids is a length-n_faces list of (M,) int64 arrays:
+        #   the node ids associated with each face vertex, used to look
+        #   scalars up by node id in the nodal-topology path.
         self._classes: list[dict[str, Any]] = []
         self._skipped_classes: list[str] = []
 
@@ -283,6 +308,7 @@ class ContourLayer(Layer):
 
             polygons: list[np.ndarray] = []
             src_ids: list[int] = []
+            face_node_ids: list[np.ndarray] = []
             for row in group.itertuples(index=False):
                 node_list = row.node_list
                 try:
@@ -295,9 +321,14 @@ class ContourLayer(Layer):
                     continue
                 if pts.shape[0] != int(n_nodes):
                     continue
+                node_list_arr = np.asarray(
+                    [int(nid) for nid in node_list], dtype=np.int64,
+                )
                 for face_idx in topo:
-                    polygons.append(pts[list(face_idx)])
+                    idx = list(face_idx)
+                    polygons.append(pts[idx])
                     src_ids.append(int(row.element_id))
+                    face_node_ids.append(node_list_arr[idx])
 
             if not polygons:
                 continue
@@ -306,6 +337,7 @@ class ContourLayer(Layer):
                     "label": label,
                     "polygons": polygons,
                     "source_element_ids": np.asarray(src_ids, dtype=np.int64),
+                    "face_node_ids": face_node_ids,
                     "actor": None,  # filled below
                 }
             )
@@ -318,8 +350,9 @@ class ContourLayer(Layer):
                 "(line elements are skipped; need shells or solids)."
             )
 
-        # Initial scalars for every drawn face, in the same class /
-        # polygon order as the geometry. Auto-frozen clim when not given.
+        # Initial scalars for every drawn face / per-vertex stream, in
+        # the same class / polygon order as the geometry. Auto-frozen
+        # clim when not given.
         initial_values = self._values_at_step(self._initial_step)
         if self.clim is None:
             global_values = np.concatenate(
@@ -334,18 +367,30 @@ class ContourLayer(Layer):
                     vmax = vmin + 1.0
                 self.clim = (vmin, vmax)
 
-        # Create actors.
+        # Create actors. The two topologies route through different
+        # add_polygons kwargs; the backend protocol guarantees that
+        # passing both at once is a ValueError, so each entry is
+        # one-or-the-other.
         backend = scene.backend
         handle = scene.handle
         for entry in self._classes:
-            values = initial_values[entry["label"]]
-            actor = backend.add_polygons(
-                handle,
-                entry["polygons"],
-                values=values,
-                cmap=self.cmap,
-                edge_color=self.edge_color,
-            )
+            scalars = initial_values[entry["label"]]
+            if self.topology == "cell":
+                actor = backend.add_polygons(
+                    handle,
+                    entry["polygons"],
+                    values=scalars,
+                    cmap=self.cmap,
+                    edge_color=self.edge_color,
+                )
+            else:  # "nodal"
+                actor = backend.add_polygons(
+                    handle,
+                    entry["polygons"],
+                    point_values=scalars,
+                    cmap=self.cmap,
+                    edge_color=self.edge_color,
+                )
             entry["actor"] = actor
             self._apply_post_hoc(actor)
 
@@ -414,27 +459,50 @@ class ContourLayer(Layer):
         return result
 
     def _values_at_step(self, step: int) -> dict[str, np.ndarray]:
-        """``{class_label: (n_faces,) float64 array}`` for ``step``.
+        """Resolve the per-class scalar arrays for ``step``.
 
-        Each face copies the source element's scalar — bricks have
-        six faces but a single per-element value.
+        Cell topology: ``{class_label: (n_faces,) float64 array}`` — one
+        value per face, looked up by ``source_element_ids``. Bricks have
+        six faces but a single per-element value broadcast across all six.
+
+        Nodal topology: ``{class_label: (sum_face_M,) float64 array}`` —
+        the flattened per-vertex stream in the same order as the
+        concatenated polygon vertex stream that ``backend.add_polygons``
+        consumes. Shared nodes resolve to identical values, which is
+        what makes the rendering visually smooth.
         """
         scalars = self._scalars_dict_at(step)
         out: dict[str, np.ndarray] = {}
         for entry in self._classes:
-            src_ids = entry["source_element_ids"]
-            try:
-                arr = np.asarray(
-                    [scalars[int(eid)] for eid in src_ids],
-                    dtype=np.float64,
-                )
-            except KeyError as exc:
-                missing = int(exc.args[0]) if exc.args else None
-                raise KeyError(
-                    f"ContourLayer.scalars is missing element id {missing} "
-                    f"(class {entry['label']!r}, step {step})."
-                ) from exc
-            out[entry["label"]] = arr
+            if self.topology == "cell":
+                src_ids = entry["source_element_ids"]
+                try:
+                    arr = np.asarray(
+                        [scalars[int(eid)] for eid in src_ids],
+                        dtype=np.float64,
+                    )
+                except KeyError as exc:
+                    missing = int(exc.args[0]) if exc.args else None
+                    raise KeyError(
+                        f"ContourLayer.scalars is missing element id "
+                        f"{missing} (class {entry['label']!r}, step {step})."
+                    ) from exc
+                out[entry["label"]] = arr
+            else:  # "nodal"
+                # Flatten the per-face node_id stream and look up each
+                # vertex's scalar by node id.
+                vertices: list[float] = []
+                for face_nids in entry["face_node_ids"]:
+                    for nid in face_nids:
+                        try:
+                            vertices.append(float(scalars[int(nid)]))
+                        except KeyError as exc:
+                            raise KeyError(
+                                f"ContourLayer.scalars is missing node id "
+                                f"{int(nid)} (class {entry['label']!r}, "
+                                f"step {step})."
+                            ) from exc
+                out[entry["label"]] = np.asarray(vertices, dtype=np.float64)
         return out
 
     def _apply_post_hoc(self, actor: Any) -> None:
