@@ -23,6 +23,7 @@ from STKO_to_python.viewer.math.gauss_extrapolation import (
     build_extrapolation_matrix,
     extrapolate_per_element,
     extrapolate_to_nodes_averaged,
+    make_gp_discrete_scalars,
     make_gp_nodal_scalars,
     per_element_max_gp_count,
 )
@@ -523,6 +524,151 @@ def test_make_gp_nodal_scalars_multistep_batch_out_of_range_raises() -> None:
     eidx = np.full(4, 1, dtype=np.int64)
     batch = np.stack([np.full(4, float(k)) for k in range(3)])
     scalars_fn = make_gp_nodal_scalars(
+        gp_values_fn=lambda step: batch,
+        element_index=eidx,
+        natural_coords=_QUAD_GP_2x2,
+        element_lookup=lookup,
+    )
+    with pytest.raises(IndexError, match="out of range"):
+        scalars_fn(99)
+
+
+# --------------------------------------------------------------------- #
+# make_gp_discrete_scalars (Phase 3.0e)                                 #
+# --------------------------------------------------------------------- #
+#
+# Closure factory parallel to :func:`make_gp_nodal_scalars`, but the
+# cross-element averaging step is skipped. Shared corners across two
+# elements receive *different* values per element — the visual
+# discontinuity is intentional and useful at material interfaces or
+# plastic-hinge regions.
+
+
+def test_make_gp_discrete_scalars_constant_field_yields_nested_dict() -> None:
+    """All GPs of one quad = 7.0 → every corner gets 7.0, keyed under
+    the element id."""
+    lookup = {
+        1: ("203-ASDShellQ4", np.array([10, 11, 12, 13], dtype=np.int64)),
+    }
+    eidx = np.full(4, 1, dtype=np.int64)
+    scalars_fn = make_gp_discrete_scalars(
+        gp_values_fn=lambda step: np.full(4, 7.0, dtype=np.float64),
+        element_index=eidx,
+        natural_coords=_QUAD_GP_2x2,
+        element_lookup=lookup,
+    )
+    out = scalars_fn(0)
+    assert set(out.keys()) == {1}
+    assert set(out[1].keys()) == {10, 11, 12, 13}
+    for nid, value in out[1].items():
+        assert value == pytest.approx(7.0)
+
+
+def test_make_gp_discrete_scalars_shared_corners_preserve_per_element_values() -> None:
+    """Two quads sharing nodes 11 and 12 — shared corners hold the
+    element-local value, NOT the average. This is exactly the
+    behaviour ``make_gp_nodal_scalars`` smooths over."""
+    lookup = {
+        1: ("203-ASDShellQ4", np.array([10, 11, 12, 13], dtype=np.int64)),
+        2: ("203-ASDShellQ4", np.array([11, 14, 15, 12], dtype=np.int64)),
+    }
+    eidx = np.concatenate([np.full(4, 1), np.full(4, 2)]).astype(np.int64)
+    nat = np.vstack([_QUAD_GP_2x2, _QUAD_GP_2x2])
+    gp_vals = np.concatenate(
+        [np.full(4, 1.0), np.full(4, 3.0)]
+    ).astype(np.float64)
+    scalars_fn = make_gp_discrete_scalars(
+        gp_values_fn=lambda step: gp_vals,
+        element_index=eidx,
+        natural_coords=nat,
+        element_lookup=lookup,
+    )
+    out = scalars_fn(0)
+    # Element 1 holds 1.0 at every corner, including the shared ones.
+    for nid in (10, 11, 12, 13):
+        assert out[1][nid] == pytest.approx(1.0)
+    # Element 2 holds 3.0 at every corner, including the shared ones.
+    for nid in (11, 14, 15, 12):
+        assert out[2][nid] == pytest.approx(3.0)
+    # Cross-check: a shared corner has different values per element.
+    assert out[1][11] != out[2][11]
+
+
+def test_make_gp_discrete_scalars_step_varying_callable() -> None:
+    lookup = {
+        1: ("203-ASDShellQ4", np.array([10, 11, 12, 13], dtype=np.int64)),
+    }
+    eidx = np.full(4, 1, dtype=np.int64)
+
+    def gp_values(step):
+        return np.full(4, float(step), dtype=np.float64)
+
+    scalars_fn = make_gp_discrete_scalars(
+        gp_values_fn=gp_values,
+        element_index=eidx,
+        natural_coords=_QUAD_GP_2x2,
+        element_lookup=lookup,
+    )
+    d3 = scalars_fn(3)
+    for v in d3[1].values():
+        assert v == pytest.approx(3.0)
+    d7 = scalars_fn(7)
+    for v in d7[1].values():
+        assert v == pytest.approx(7.0)
+
+
+def test_make_gp_discrete_scalars_empty_lookup_returns_empty_dict() -> None:
+    eidx = np.full(4, 1, dtype=np.int64)
+    scalars_fn = make_gp_discrete_scalars(
+        gp_values_fn=lambda step: np.zeros(4, dtype=np.float64),
+        element_index=eidx,
+        natural_coords=_QUAD_GP_2x2,
+        element_lookup={},
+    )
+    assert scalars_fn(0) == {}
+
+
+def test_make_gp_discrete_scalars_rejects_scalar_input() -> None:
+    scalars_fn = make_gp_discrete_scalars(
+        gp_values_fn=lambda step: np.asarray(1.0),
+        element_index=np.array([1], dtype=np.int64),
+        natural_coords=np.array([[0.0, 0.0]]),
+        element_lookup={
+            1: ("203-ASDShellQ4", np.array([1, 2, 3, 4], dtype=np.int64)),
+        },
+    )
+    with pytest.raises(ValueError, match="0-D scalar"):
+        scalars_fn(0)
+
+
+def test_make_gp_discrete_scalars_multistep_batch_indexes_by_step() -> None:
+    """Same multi-step batch contract as :func:`make_gp_nodal_scalars`
+    so callers can swap helpers without rewriting the gp_values_fn."""
+    lookup = {
+        1: ("203-ASDShellQ4", np.array([10, 11, 12, 13], dtype=np.int64)),
+    }
+    eidx = np.full(4, 1, dtype=np.int64)
+    batch = np.stack([np.full(4, float(k)) for k in range(3)])
+
+    scalars_fn = make_gp_discrete_scalars(
+        gp_values_fn=lambda step: batch,
+        element_index=eidx,
+        natural_coords=_QUAD_GP_2x2,
+        element_lookup=lookup,
+    )
+    for k in range(3):
+        d = scalars_fn(k)
+        for v in d[1].values():
+            assert v == pytest.approx(float(k))
+
+
+def test_make_gp_discrete_scalars_multistep_batch_out_of_range_raises() -> None:
+    lookup = {
+        1: ("203-ASDShellQ4", np.array([10, 11, 12, 13], dtype=np.int64)),
+    }
+    eidx = np.full(4, 1, dtype=np.int64)
+    batch = np.stack([np.full(4, float(k)) for k in range(3)])
+    scalars_fn = make_gp_discrete_scalars(
         gp_values_fn=lambda step: batch,
         element_index=eidx,
         natural_coords=_QUAD_GP_2x2,

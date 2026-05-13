@@ -809,6 +809,222 @@ def test_pyvista_gp_extrap_smooth_end_to_end() -> None:
         handle.plotter.close()
 
 
+def test_topology_nodal_discrete_is_accepted() -> None:
+    """The Phase 3.0e topology must construct cleanly without attach."""
+    layer = ContourLayer(scalars={1: {10: 0.0}}, topology="nodal_discrete")
+    assert layer.topology == "nodal_discrete"
+
+
+def test_topology_unknown_value_message_lists_all_modes() -> None:
+    with pytest.raises(ValueError, match="nodal_discrete"):
+        ContourLayer(scalars={1: 0.0}, topology="bogus")
+
+
+def test_nodal_discrete_mode_on_mpl_raises_capability_error() -> None:
+    """matplotlib can't do per-vertex coloring — discrete mode hits the
+    same backend gate as smooth nodal."""
+    from STKO_to_python.viewer.core.errors import BackendCapabilityError
+
+    fake = _make_fake_dataset()
+    scene = _make_scene(fake)
+    scalars = {
+        11: {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0},
+        12: {2: 3.0, 5: 3.0, 6: 3.0, 3: 3.0},
+        13: {1: 2.0, 2: 2.0, 4: 2.0},
+    }
+    layer = ContourLayer(scalars=scalars, topology="nodal_discrete")
+    try:
+        with pytest.raises(BackendCapabilityError, match="per-vertex"):
+            scene.add(layer)
+    finally:
+        plt.close("all")
+
+
+def test_pyvista_nodal_discrete_preserves_per_element_values() -> None:
+    """Two quads sharing two corner nodes — the discrete path keeps
+    each element's own value at the duplicated vertex copies of the
+    shared nodes, instead of averaging them."""
+    pv = pytest.importorskip("pyvista")
+    from STKO_to_python.viewer.backends.pyvista import PyVistaBackend
+
+    fake = _make_fake_dataset()
+    backend = PyVistaBackend()
+    handle = backend.make_scene(is_3d=True, off_screen=True)
+    try:
+        source = MPCODataSourceAdapter(fake)
+        scene = Scene(backend, source, is_3d=True, handle=handle)
+
+        # Element 11 (1, 2, 3, 4) holds 1.0 at every corner; element 12
+        # (2, 5, 6, 3) holds 3.0 at every corner.
+        scalars = {
+            11: {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0},
+            12: {2: 3.0, 5: 3.0, 6: 3.0, 3: 3.0},
+        }
+        layer = ContourLayer(
+            scalars=scalars,
+            topology="nodal_discrete",
+            selection=SelectionSpec(element_type="203-ASDShellQ4"),
+        )
+        scene.add(layer)
+        q4_ref = layer.actors["203-ASDShellQ4(4n)"]
+        # Vertex stream: quad 11 (1,2,3,4) → all 1.0,
+        #                quad 12 (2,5,6,3) → all 3.0.
+        # Shared corners 2 and 3 carry DIFFERENT values per element's
+        # duplicated copy — that's the discontinuity contract.
+        np.testing.assert_allclose(
+            q4_ref.dataset.point_data["point_values"],
+            [1.0, 1.0, 1.0, 1.0,    # quad 11
+             3.0, 3.0, 3.0, 3.0],   # quad 12
+        )
+    finally:
+        handle.plotter.close()
+
+
+def test_pyvista_nodal_discrete_in_place_update_keeps_same_actor() -> None:
+    """The same actor instance survives update_to_step — apeGmsh perf
+    contract holds for the discrete path too."""
+    pv = pytest.importorskip("pyvista")
+    from STKO_to_python.viewer.backends.pyvista import PyVistaBackend
+
+    fake = _make_fake_dataset()
+    backend = PyVistaBackend()
+    handle = backend.make_scene(is_3d=True, off_screen=True)
+    try:
+        source = MPCODataSourceAdapter(fake)
+        scene = Scene(backend, source, is_3d=True, handle=handle)
+
+        def scalars_at(step):
+            base = float(step)
+            return {
+                11: {1: base, 2: base, 3: base, 4: base},
+                12: {2: base + 10, 5: base + 10, 6: base + 10, 3: base + 10},
+            }
+
+        layer = ContourLayer(
+            scalars=scalars_at,
+            topology="nodal_discrete",
+            step=0,
+            selection=SelectionSpec(element_type="203-ASDShellQ4"),
+        )
+        scene.add(layer)
+        ref_before = layer.actors["203-ASDShellQ4(4n)"]
+        layer.update_to_step(7)
+        ref_after = layer.actors["203-ASDShellQ4(4n)"]
+        assert ref_after is ref_before
+        assert layer.current_step == 7
+        # Quad 11 → 7.0 everywhere; quad 12 → 17.0 everywhere.
+        np.testing.assert_allclose(
+            ref_after.dataset.point_data["point_values"],
+            [7.0, 7.0, 7.0, 7.0,
+             17.0, 17.0, 17.0, 17.0],
+        )
+    finally:
+        handle.plotter.close()
+
+
+def test_pyvista_nodal_discrete_missing_element_raises() -> None:
+    """An element rendered by the layer but not in the scalars dict
+    fails loud with a topology-aware error message."""
+    pv = pytest.importorskip("pyvista")
+    from STKO_to_python.viewer.backends.pyvista import PyVistaBackend
+
+    fake = _make_fake_dataset()
+    backend = PyVistaBackend()
+    handle = backend.make_scene(is_3d=True, off_screen=True)
+    try:
+        source = MPCODataSourceAdapter(fake)
+        scene = Scene(backend, source, is_3d=True, handle=handle)
+        layer = ContourLayer(
+            scalars={11: {1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0}},  # 12 missing
+            topology="nodal_discrete",
+            selection=SelectionSpec(element_type="203-ASDShellQ4"),
+        )
+        with pytest.raises(KeyError, match="element id 12"):
+            scene.add(layer)
+    finally:
+        handle.plotter.close()
+
+
+def test_pyvista_nodal_discrete_missing_node_in_element_raises() -> None:
+    """A corner present in the element but missing from the inner
+    dict yields a precise (element, node) error."""
+    pv = pytest.importorskip("pyvista")
+    from STKO_to_python.viewer.backends.pyvista import PyVistaBackend
+
+    fake = _make_fake_dataset()
+    backend = PyVistaBackend()
+    handle = backend.make_scene(is_3d=True, off_screen=True)
+    try:
+        source = MPCODataSourceAdapter(fake)
+        scene = Scene(backend, source, is_3d=True, handle=handle)
+        layer = ContourLayer(
+            scalars={
+                11: {1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0},
+                12: {2: 0.0, 5: 0.0, 6: 0.0},  # missing node 3
+            },
+            topology="nodal_discrete",
+            selection=SelectionSpec(element_type="203-ASDShellQ4"),
+        )
+        with pytest.raises(KeyError, match=r"\(element id 12, node id 3\)"):
+            scene.add(layer)
+    finally:
+        handle.plotter.close()
+
+
+def test_pyvista_gp_discrete_end_to_end() -> None:
+    """make_gp_discrete_scalars → ContourLayer(topology='nodal_discrete')
+    end-to-end: two quads with constant per-element GP fields produce
+    a discontinuous contour at the shared edge."""
+    pv = pytest.importorskip("pyvista")
+    from STKO_to_python.viewer.backends.pyvista import PyVistaBackend
+    from STKO_to_python.viewer.math.gauss_extrapolation import (
+        make_gp_discrete_scalars,
+    )
+
+    g = 1.0 / np.sqrt(3.0)
+    quad_2x2 = np.array(
+        [[-g, -g], [+g, -g], [+g, +g], [-g, +g]], dtype=np.float64,
+    )
+    eidx = np.concatenate([np.full(4, 11), np.full(4, 12)]).astype(np.int64)
+    nat = np.vstack([quad_2x2, quad_2x2])
+    gp_values_const = np.concatenate(
+        [np.full(4, 1.0), np.full(4, 3.0)]
+    ).astype(np.float64)
+
+    scalars_fn = make_gp_discrete_scalars(
+        gp_values_fn=lambda step: gp_values_const,
+        element_index=eidx,
+        natural_coords=nat,
+        element_lookup={
+            11: ("203-ASDShellQ4", np.array([1, 2, 3, 4], dtype=np.int64)),
+            12: ("203-ASDShellQ4", np.array([2, 5, 6, 3], dtype=np.int64)),
+        },
+    )
+
+    fake = _make_fake_dataset()
+    backend = PyVistaBackend()
+    handle = backend.make_scene(is_3d=True, off_screen=True)
+    try:
+        source = MPCODataSourceAdapter(fake)
+        scene = Scene(backend, source, is_3d=True, handle=handle)
+        layer = ContourLayer(
+            scalars=scalars_fn,
+            topology="nodal_discrete",
+            selection=SelectionSpec(element_type="203-ASDShellQ4"),
+        )
+        scene.add(layer)
+        q4_ref = layer.actors["203-ASDShellQ4(4n)"]
+        # Each element's vertex stream holds that element's constant
+        # value at every corner copy — INCLUDING the shared edge.
+        np.testing.assert_allclose(
+            q4_ref.dataset.point_data["point_values"],
+            [1.0, 1.0, 1.0, 1.0,
+             3.0, 3.0, 3.0, 3.0],
+        )
+    finally:
+        handle.plotter.close()
+
+
 def test_pyvista_gp_extrap_smooth_step_varying_animates() -> None:
     """A step-varying gp_values_fn drives in-place point_data mutation on
     the SAME actor across animation steps."""

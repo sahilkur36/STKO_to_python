@@ -1,35 +1,47 @@
-"""``ContourLayer`` — scalar field over the mesh, cell- or nodal-topology.
+"""``ContourLayer`` — scalar field over the mesh, three topology modes.
 
 Renders filled polygons over the model surface, colored by a caller-
-supplied scalar map. Implements two of the five paths from the
-directive (per ``docs/viewer/02-porting-from-apegmsh.md`` §4 /
-apeGmsh's ``viewers/diagrams/_contour.py``):
+supplied scalar map. As of Phase 3.0e the layer covers all five
+paths of the directive (per ``docs/viewer/02-porting-from-apegmsh.md``
+§4 / apeGmsh's ``viewers/diagrams/_contour.py``) across three
+exposed topology modes:
 
 * **cell** (Phase 3.0b) — one scalar per element; rendered through
-  ``backend.add_polygons(values=...)``.
+  ``backend.add_polygons(values=...)``. Same renderer handles the
+  GP-cell-averaged path when the caller pre-aggregates per-GP
+  values to per-cell upstream.
 * **nodal** (Phase 3.0c) — one scalar per node; rendered through
   ``backend.add_polygons(point_values=...)`` for smooth Gouraud-style
-  interpolation. PyVista native; MplBackend raises
-  :class:`BackendCapabilityError` because matplotlib's
-  ``PolyCollection`` is per-cell only.
+  interpolation. Same renderer handles the GP-node-extrap-smooth
+  path via :func:`STKO_to_python.viewer.math.gauss_extrapolation.make_gp_nodal_scalars`,
+  which wraps ``extrapolate_per_element`` +
+  ``extrapolate_to_nodes_averaged`` and returns the right dict shape.
+* **nodal_discrete** (Phase 3.0e) — one scalar per ``(element_id,
+  node_id)`` pair; rendered through ``point_values=`` like ``nodal``
+  but the lookup is per-element so duplicated vertex copies of a
+  shared node hold the value of the element they belong to, not the
+  averaged value across neighbours. Preserves the field
+  discontinuity at element boundaries — useful at material
+  interfaces, plastic-hinge regions, or wherever the smoothing would
+  mislead the engineer's eye. Paired with
+  :func:`~STKO_to_python.viewer.math.gauss_extrapolation.make_gp_discrete_scalars`
+  to feed it from GP values.
 
-The remaining three paths from the directive are upstream
-aggregations of these two:
-
-* GP-cell-averaged — one scalar per element from averaged per-GP
-  values; same renderer path as ``cell``.
-* GP-node-extrap-smooth — extrapolate GPs to nodes via
-  :func:`STKO_to_python.viewer.math.gauss_extrapolation.extrapolate_to_nodes_averaged`,
-  then render as ``nodal``. Phase 3.0d.
-* GP-node-discrete — extrapolate per-element, render each element's
-  corner values as a separate discontinuous polygon. Phase 3.0e.
+PyVista renders all three modes natively. ``MplBackend`` only
+supports ``cell``; the two nodal modes raise
+:class:`BackendCapabilityError` because matplotlib's
+``PolyCollection`` is per-cell only.
 
 Scalars contract
 ----------------
 
-For ``topology="cell"``, the caller supplies scalars as
-``dict[element_id, float]``. For ``topology="nodal"``, the caller
-supplies ``dict[node_id, float]``. In both cases the input is either:
+The dict shape depends on the topology:
+
+* ``"cell"``       → ``dict[element_id, float]``.
+* ``"nodal"``      → ``dict[node_id, float]``.
+* ``"nodal_discrete"`` → ``dict[element_id, dict[node_id, float]]``.
+
+In all three the input is either:
 
 * a **static** dict — the layer is non-time-varying and
   :meth:`update_to_step` is a no-op;
@@ -37,13 +49,12 @@ supplies ``dict[node_id, float]``. In both cases the input is either:
   initial step) and at every :meth:`update_to_step` — same dict
   shape, fresh per call.
 
-Both shapes are dict-based on purpose: the caller doesn't need to
-know the renderer's element / vertex ordering, and a missing key is
-a hard error (no silent data dropouts). Nodal-mode lookups happen
-per face vertex against the **node** the vertex came from — shared
-nodes across neighbouring faces resolve to the same scalar value,
-which is what makes the rendering visually smooth despite the
-polydata storing duplicated vertices per polygon.
+Dict-based on purpose: the caller doesn't need to know the
+renderer's element / vertex ordering, and a missing key is a hard
+error (no silent data dropouts). The ``nodal`` mode resolves shared
+nodes to the same scalar value at every duplicated vertex copy
+(visually smooth); ``nodal_discrete`` resolves duplicated copies to
+**per-element** values (visually discontinuous at boundaries).
 """
 from __future__ import annotations
 
@@ -191,9 +202,10 @@ class ContourLayer(Layer):
         super().__init__(
             name=name, selection=selection, visible=visible, z_order=z_order,
         )
-        if topology not in ("cell", "nodal"):
+        if topology not in ("cell", "nodal", "nodal_discrete"):
             raise ValueError(
-                f"topology must be 'cell' or 'nodal', got {topology!r}."
+                "topology must be one of 'cell', 'nodal', or "
+                f"'nodal_discrete', got {topology!r}."
             )
         self.topology = topology
         self._scalars_input: ScalarsInput = scalars
@@ -367,10 +379,10 @@ class ContourLayer(Layer):
                     vmax = vmin + 1.0
                 self.clim = (vmin, vmax)
 
-        # Create actors. The two topologies route through different
-        # add_polygons kwargs; the backend protocol guarantees that
-        # passing both at once is a ValueError, so each entry is
-        # one-or-the-other.
+        # Create actors. The cell mode binds per-cell scalars; both
+        # nodal modes (smooth and discrete) bind per-vertex scalars
+        # and the difference lives entirely in the lookup logic
+        # below — same renderer primitive, different dict shape.
         backend = scene.backend
         handle = scene.handle
         for entry in self._classes:
@@ -383,7 +395,7 @@ class ContourLayer(Layer):
                     cmap=self.cmap,
                     edge_color=self.edge_color,
                 )
-            else:  # "nodal"
+            else:  # "nodal" | "nodal_discrete"
                 actor = backend.add_polygons(
                     handle,
                     entry["polygons"],
@@ -470,6 +482,12 @@ class ContourLayer(Layer):
         concatenated polygon vertex stream that ``backend.add_polygons``
         consumes. Shared nodes resolve to identical values, which is
         what makes the rendering visually smooth.
+
+        Nodal-discrete topology: same flattened per-vertex stream as
+        ``nodal``, but the lookup is per ``(element_id, node_id)``.
+        Duplicated vertex copies of a shared node hold the value of
+        the element they belong to, preserving the field
+        discontinuity at element boundaries.
         """
         scalars = self._scalars_dict_at(step)
         out: dict[str, np.ndarray] = {}
@@ -488,7 +506,7 @@ class ContourLayer(Layer):
                         f"{missing} (class {entry['label']!r}, step {step})."
                     ) from exc
                 out[entry["label"]] = arr
-            else:  # "nodal"
+            elif self.topology == "nodal":
                 # Flatten the per-face node_id stream and look up each
                 # vertex's scalar by node id.
                 vertices: list[float] = []
@@ -500,6 +518,36 @@ class ContourLayer(Layer):
                             raise KeyError(
                                 f"ContourLayer.scalars is missing node id "
                                 f"{int(nid)} (class {entry['label']!r}, "
+                                f"step {step})."
+                            ) from exc
+                out[entry["label"]] = np.asarray(vertices, dtype=np.float64)
+            else:  # "nodal_discrete"
+                # Same per-vertex stream, but the lookup is per
+                # (element_id, node_id) so duplicated copies of a
+                # shared node hold the element-local value.
+                vertices = []
+                src_ids = entry["source_element_ids"]
+                for face_eid, face_nids in zip(
+                    src_ids, entry["face_node_ids"],
+                ):
+                    eid_int = int(face_eid)
+                    try:
+                        per_elem = scalars[eid_int]
+                    except KeyError as exc:
+                        raise KeyError(
+                            f"ContourLayer.scalars is missing element id "
+                            f"{eid_int} (class {entry['label']!r}, "
+                            f"step {step})."
+                        ) from exc
+                    for nid in face_nids:
+                        nid_int = int(nid)
+                        try:
+                            vertices.append(float(per_elem[nid_int]))
+                        except (KeyError, TypeError) as exc:
+                            raise KeyError(
+                                f"ContourLayer.scalars is missing entry "
+                                f"for (element id {eid_int}, node id "
+                                f"{nid_int}) (class {entry['label']!r}, "
                                 f"step {step})."
                             ) from exc
                 out[entry["label"]] = np.asarray(vertices, dtype=np.float64)
