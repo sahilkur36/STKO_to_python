@@ -38,7 +38,7 @@ Five layers, top to bottom. Data flows down on initialization, up on render.
    +----------------------------------+
    |  Layer 5: User-facing API        |   MPCODataSet.viewer(),
    |                                  |   ds.scene(), Scene(), MultiScene(),
-   |                                  |   stko-viewer CLI
+   |                                  |   mpco-viewer CLI
    +----------------------------------+
                    |
                    v
@@ -297,7 +297,7 @@ event loop is the master clock.
 ### 7.2 Headless / batch
 
 ```
-stko-viewer animate run.mpco --config view.toml --out anim.mp4
+mpco-viewer animate run.mpco --config view.toml --out anim.mp4
         │
         └── load view.toml -> SceneSpec
             scene = Scene.from_spec(spec, ds)
@@ -399,7 +399,7 @@ src/STKO_to_python/viewer/
 ├── qt/                      # Phase 4
 │   ├── app.py
 │   ├── main_window.py
-│   ├── cli.py               # stko-viewer entry point
+│   ├── cli.py               # mpco-viewer entry point
 │   ├── widgets/
 │   │   ├── outline_tree.py
 │   │   ├── viewport.py
@@ -413,7 +413,7 @@ src/STKO_to_python/viewer/
 │   └── theme.py
 │
 ├── headless/                # Phase 5
-│   ├── cli.py               # stko-viewer animate/screenshot/batch
+│   ├── cli.py               # mpco-viewer animate/screenshot/batch
 │   └── runner.py
 │
 └── web/                     # Phase 6 (deferred)

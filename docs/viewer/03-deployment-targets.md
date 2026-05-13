@@ -37,7 +37,7 @@ This adds: `pyvista>=0.43`, `vtk>=9.2`, `PySide6>=6.5`,
 **Launch:**
 
 ```bash
-stko-viewer path/to/results.mpco
+mpco-viewer path/to/results.mpco
 ```
 
 or from Python:
@@ -114,7 +114,7 @@ the answer lives next to the install docs:
 
 ```bash
 ssh -X user@cluster
-stko-viewer ...
+mpco-viewer ...
 ```
 
 What happens:
@@ -150,7 +150,7 @@ only compressed pixels — much better than X11 forwarding.
 vncviewer cluster:1
 # Inside the VNC session:
 pip install "stko_to_python[viewer]"
-stko-viewer results.mpco
+mpco-viewer results.mpco
 ```
 
 Performance: usable for inspection, less smooth than local. Animation
@@ -185,18 +185,18 @@ calls it for you on Linux when `$DISPLAY` is unset.
 
 ```bash
 # Single frame:
-stko-viewer screenshot results.mpco --step 250 --out frame.png
+mpco-viewer screenshot results.mpco --step 250 --out frame.png
 
 # Animation:
-stko-viewer animate results.mpco --config view.toml --out anim.mp4
+mpco-viewer animate results.mpco --config view.toml --out anim.mp4
 
 # Batch render every Nth step:
-stko-viewer batch results.mpco --config batch.toml --out frames/
+mpco-viewer batch results.mpco --config batch.toml --out frames/
 
 # Save a scene in the GUI, then run it on the cluster:
 # (laptop) Edit scene visually, File > Save scene to view.toml
 # (laptop) scp view.toml cluster:~/run/
-# (cluster) stko-viewer animate results.mpco --config view.toml --out anim.mp4
+# (cluster) mpco-viewer animate results.mpco --config view.toml --out anim.mp4
 # (laptop) scp cluster:~/run/anim.mp4 .
 ```
 
@@ -211,7 +211,7 @@ This is the workflow most engineers actually use for big runs.
 #SBATCH --mem=8G
 module load python/3.12
 source ~/venvs/stko/bin/activate   # has stko_to_python[viewer-headless] installed
-xvfb-run -a stko-viewer animate $RESULTS --config view.toml --out anim.mp4
+xvfb-run -a mpco-viewer animate $RESULTS --config view.toml --out anim.mp4
 ```
 
 ---
@@ -238,7 +238,7 @@ laptop browser ───── http (WebSocket) ─────► trame server 
 ssh -L 8080:localhost:8080 user@cluster
 # In another terminal:
 ssh user@cluster
-stko-viewer web results.mpco --port 8080
+mpco-viewer web results.mpco --port 8080
 # In laptop browser:
 open http://localhost:8080
 ```
@@ -269,7 +269,7 @@ enough to fit in browser memory, server-side otherwise. Configurable.
               │                    │                    │
               │                    │                    │
    [viewer] + local      What I want?              [viewer-headless]
-   stko-viewer ...           │                     stko-viewer animate ...
+   mpco-viewer ...           │                     mpco-viewer animate ...
                              ├── interactive 3D
                              │      │
                              │      ├── cluster has VNC?
