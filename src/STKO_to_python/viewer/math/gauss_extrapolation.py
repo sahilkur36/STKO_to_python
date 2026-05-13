@@ -90,6 +90,7 @@ __all__ = [
     "extrapolate_per_element",
     "extrapolate_to_nodes_averaged",
     "make_gp_nodal_scalars",
+    "make_gp_discrete_scalars",
 ]
 
 
@@ -459,5 +460,114 @@ def make_gp_nodal_scalars(
         else:
             row = nodal
         return {int(nid): float(v) for nid, v in zip(node_ids, row)}
+
+    return _scalars
+
+
+def make_gp_discrete_scalars(
+    *,
+    gp_values_fn: Callable[[int], np.ndarray],
+    element_index: np.ndarray,
+    natural_coords: np.ndarray,
+    element_lookup: Mapping[int, tuple],
+) -> Callable[[int], dict[int, dict[int, float]]]:
+    """Build a step-callable that yields ``{element_id: {node_id: value}}``
+    for :class:`~STKO_to_python.viewer.layers.ContourLayer`'s
+    ``topology="nodal_discrete"`` path.
+
+    This is the **GP-node-discrete** path of the directive's five-path
+    dispatch (per ``docs/viewer/02-porting-from-apegmsh.md`` §4). Same
+    inputs as :func:`make_gp_nodal_scalars`, same per-element pinv
+    projection — but the cross-element averaging step is **skipped**.
+    Each element keeps its own corner-value copies, so visualisations
+    preserve the field discontinuity at element boundaries (useful at
+    material interfaces, plastic-hinge regions, or wherever the
+    smoothing would mislead the engineer's eye).
+
+    Args:
+        gp_values_fn: Callable ``(step) -> (n_total_gp,) ndarray``.
+            Returns per-GP values for one analysis step in the same
+            row order as ``element_index`` and ``natural_coords``.
+            Multi-step batches ``(T, n_total_gp)`` are also accepted
+            and indexed by ``step`` — see :func:`make_gp_nodal_scalars`
+            for the same affordance.
+        element_index: ``(n_total_gp,)`` int — element id per GP row.
+            Pinned at construction.
+        natural_coords: ``(n_total_gp, dim)`` float — natural-coord
+            position of each GP. Pinned at construction.
+        element_lookup: ``{element_id: (element_class,
+            corner_node_ids)}`` map. Pinned at construction.
+
+    Returns:
+        A callable ``(step: int) -> dict[int, dict[int, float]]``.
+        The outer key is the element id; the inner dict maps the
+        element's corner node ids to per-corner values. Elements not
+        present in ``element_lookup`` (or whose class is not in the
+        shape-function catalog) are silently dropped — same behaviour
+        as :func:`extrapolate_per_element`.
+
+    Example:
+        ::
+
+            from STKO_to_python.viewer.math.gauss_extrapolation import (
+                make_gp_discrete_scalars,
+            )
+            from STKO_to_python.viewer.layers import ContourLayer
+
+            scalars_fn = make_gp_discrete_scalars(
+                gp_values_fn=per_step_gp_values,
+                element_index=ip_to_element_id_array,
+                natural_coords=ip_natural_coords,
+                element_lookup={
+                    eid: ("203-ASDShellQ4", corners)
+                    for eid, corners in shell_corner_map.items()
+                },
+            )
+            layer = ContourLayer(
+                scalars=scalars_fn, topology="nodal_discrete", step=0,
+            )
+    """
+    eidx = np.asarray(element_index, dtype=np.int64)
+    nat = np.asarray(natural_coords, dtype=np.float64)
+
+    def _scalars(step: int) -> dict[int, dict[int, float]]:
+        gp = np.asarray(gp_values_fn(int(step)), dtype=np.float64)
+        if gp.ndim == 0:
+            raise ValueError(
+                "gp_values_fn must return a 1-D array; got 0-D scalar."
+            )
+        per_elem = extrapolate_per_element(
+            eidx, nat, gp, dict(element_lookup),
+        )
+        if per_elem.element_ids.size == 0:
+            return {}
+
+        # ``per_elem.values[k]`` is ``(T, n_corner_k)`` regardless of
+        # input rank. Single-step inputs land in row 0; multi-step
+        # batches index by ``step`` (with bounds-checking parallel to
+        # ``make_gp_nodal_scalars`` so callers can swap helpers
+        # without surprises).
+        T = per_elem.time_count
+        if T == 1:
+            row_idx = 0
+        elif 0 <= int(step) < T:
+            row_idx = int(step)
+        else:
+            raise IndexError(
+                f"step={step} is out of range for the multi-step "
+                f"gp_values_fn output of time_count={T}."
+            )
+
+        out: dict[int, dict[int, float]] = {}
+        for eid, corner_nids, per_corner in zip(
+            per_elem.element_ids,
+            per_elem.corner_node_ids,
+            per_elem.values,
+        ):
+            row = per_corner[row_idx]
+            out[int(eid)] = {
+                int(nid): float(v) for nid, v in zip(corner_nids, row)
+            }
+        return out
 
     return _scalars
