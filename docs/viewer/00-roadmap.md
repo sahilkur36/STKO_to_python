@@ -59,7 +59,7 @@ actually break something.
 | Phase 1 — Algorithm tier | `v1.10.0` | New pure-numpy modules; matplotlib renderers may opt to use them. |
 | Phase 2 — Backend + 2D layers | `v1.11.0` | Scene/Layer machinery under existing `Plot.*` methods. Convenience API unchanged. |
 | Phase 3 — PyVista backend + 3D layers | `v1.12.0` | New `[viewer-3d]` extra. Qt not yet required. |
-| Phase 4 — Qt desktop | `v1.13.0` | New `[viewer]` extra. Adds CLI entry point `stko-viewer`. |
+| Phase 4 — Qt desktop | `v1.13.0` | New `[viewer]` extra. Adds CLI entry point `mpco-viewer`. |
 | Phase 5 — Headless CLI | `v1.14.0` | New `[viewer-headless]` extra; animation/screenshot CLI. |
 | Phase 6 — Trame web | `v2.0.0` *(optional)* | Only bumps MAJOR if it forces a refactor of the public viewer API. Otherwise stays MINOR. |
 
@@ -217,7 +217,7 @@ because the algorithms are mostly already done by Phase 1.
 
 ## Phase 4 — Qt desktop UI
 
-**Goal:** the "full experience." Ship the `stko-viewer` GUI: dock layout,
+**Goal:** the "full experience." Ship the `mpco-viewer` GUI: dock layout,
 time scrubber, diagram tree, picking, settings tabs, animation export.
 
 **Deliverables:**
@@ -237,8 +237,8 @@ time scrubber, diagram tree, picking, settings tabs, animation export.
       `step_changed` callbacks.
     - `picking.py` — port of apeGmsh's vectorized box-pick math.
     - `session.py` — save/restore window layout + layer specs to disk.
-- `pyproject.toml` — add `[project.scripts]` entry: `stko-viewer = STKO_to_python.viewer.qt.cli:main`
-- `stko-viewer <file.mpco>` — open the file in the GUI.
+- `pyproject.toml` — add `[project.scripts]` entry: `mpco-viewer = STKO_to_python.viewer.qt.cli:main`
+- `mpco-viewer <file.mpco>` — open the file in the GUI.
 - `MPCODataSet.viewer()` — open the current dataset in the GUI (blocks).
 
 **Definition of done:**
@@ -263,9 +263,9 @@ as the GUI, no Qt loop.
 
 **Deliverables:**
 
-- `stko-viewer animate run.mpco --config view.toml --out anim.mp4`
-- `stko-viewer screenshot run.mpco --step 250 --out frame.png`
-- `stko-viewer batch run.mpco --config batch.toml --out frames/`
+- `mpco-viewer animate run.mpco --config view.toml --out anim.mp4`
+- `mpco-viewer screenshot run.mpco --step 250 --out frame.png`
+- `mpco-viewer batch run.mpco --config batch.toml --out frames/`
 - `view.toml` schema — declarative spec for layers + camera + step range.
   Matches the in-memory `Scene` layout 1:1 so the GUI can save → run on
   cluster → reload result.
@@ -275,7 +275,7 @@ as the GUI, no Qt loop.
 **Definition of done:**
 
 - Animation runs on a headless Linux box with no `$DISPLAY` set.
-- `stko-viewer screenshot` produces the same PNG (within tolerance) as
+- `mpco-viewer screenshot` produces the same PNG (within tolerance) as
   the GUI's "Save snapshot" button does on the same step.
 
 **Estimate:** ~1.5 weeks. **Risk:** low. Most of the work is CLI wiring;
