@@ -60,7 +60,7 @@ entries; add one entry per future higher-order class.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Mapping, Optional
 
 import numpy as np
 
@@ -89,6 +89,7 @@ __all__ = [
     "build_extrapolation_matrix",
     "extrapolate_per_element",
     "extrapolate_to_nodes_averaged",
+    "make_gp_nodal_scalars",
 ]
 
 
@@ -348,3 +349,115 @@ def extrapolate_to_nodes_averaged(
     for j, nid in enumerate(node_ids):
         nodal[:, j] = sums[int(nid)] / counts[int(nid)]
     return node_ids, nodal
+
+
+def make_gp_nodal_scalars(
+    *,
+    gp_values_fn: Callable[[int], np.ndarray],
+    element_index: np.ndarray,
+    natural_coords: np.ndarray,
+    element_lookup: Mapping[int, tuple],
+) -> Callable[[int], dict[int, float]]:
+    """Build a step-callable that yields ``{node_id: value}`` for
+    :class:`~STKO_to_python.viewer.layers.ContourLayer`'s
+    ``topology="nodal"`` path.
+
+    This is the **GP-node-extrap-smooth** path of the directive's
+    five-path dispatch (per
+    ``docs/viewer/02-porting-from-apegmsh.md`` §4). Wraps
+    :func:`extrapolate_per_element` and
+    :func:`extrapolate_to_nodes_averaged` into a single closure that
+    feeds ContourLayer's nodal scalars contract.
+
+    Args:
+        gp_values_fn: Callable ``(step) -> (n_total_gp,) ndarray``.
+            Returns per-GP values for one analysis step in the same
+            row order as ``element_index`` and ``natural_coords``.
+            The query engine's LRU cache typically makes per-step
+            calls cheap after the first.
+        element_index: ``(n_total_gp,)`` int — element id per GP row.
+            Pinned at construction; layers can't move GPs across
+            elements mid-animation.
+        natural_coords: ``(n_total_gp, dim)`` float — natural-coord
+            position of each GP in its parent element. Pinned at
+            construction.
+        element_lookup: ``{element_id: (element_class,
+            corner_node_ids)}`` map. ``element_class`` is a STKO class
+            key (e.g. ``"203-ASDShellQ4"``); ``corner_node_ids`` is a
+            ``(n_corner,)`` int array. Pinned at construction.
+
+    Returns:
+        A callable ``(step: int) -> dict[int, float]`` that
+        :class:`ContourLayer` consumes as its ``scalars=`` argument.
+        Each call evaluates the extrapolation pipeline at one step;
+        shared corners across neighbouring elements get the
+        arithmetic mean per
+        :func:`extrapolate_to_nodes_averaged`. The dict is empty
+        when no element survives ``element_lookup`` filtering at
+        the given step.
+
+    Example:
+        ::
+
+            from STKO_to_python.viewer.math.gauss_extrapolation import (
+                make_gp_nodal_scalars,
+            )
+            from STKO_to_python.viewer.layers import ContourLayer
+
+            def per_step_gp_values(step):
+                # Pull a (n_total_gp,) array from your ElementResults
+                # at ``step`` — order must match ``element_index``.
+                ...
+
+            scalars_fn = make_gp_nodal_scalars(
+                gp_values_fn=per_step_gp_values,
+                element_index=ip_to_element_id_array,
+                natural_coords=ip_natural_coords,
+                element_lookup={
+                    eid: ("203-ASDShellQ4", corners)
+                    for eid, corners in shell_corner_map.items()
+                },
+            )
+            layer = ContourLayer(
+                scalars=scalars_fn, topology="nodal", step=0,
+            )
+    """
+    eidx = np.asarray(element_index, dtype=np.int64)
+    nat = np.asarray(natural_coords, dtype=np.float64)
+
+    def _scalars(step: int) -> dict[int, float]:
+        gp = np.asarray(gp_values_fn(int(step)), dtype=np.float64)
+        if gp.ndim == 0:
+            raise ValueError(
+                "gp_values_fn must return a 1-D array; got 0-D scalar."
+            )
+        # ``extrapolate_per_element`` accepts both ``(n_total_gp,)`` and
+        # ``(T, n_total_gp)``; we pass through unchanged so a caller
+        # who wants T>1 batches can opt in by returning a 2-D array.
+        per_elem = extrapolate_per_element(
+            eidx, nat, gp, dict(element_lookup),
+        )
+        node_ids, nodal = extrapolate_to_nodes_averaged(per_elem)
+        if node_ids.size == 0:
+            return {}
+        # ``nodal`` is always ``(T, N)``. For the typical T=1 case we
+        # take the row directly; the 2-D path covers the batch case.
+        if nodal.ndim == 2 and nodal.shape[0] == 1:
+            row = nodal[0]
+        elif nodal.ndim == 2:
+            # Multi-step batch: take the row whose index matches ``step``
+            # if it's a valid index, else error. This is the affordance
+            # that lets a caller precompute every step once and re-index
+            # cheaply afterward — useful for animation export.
+            if 0 <= int(step) < nodal.shape[0]:
+                row = nodal[int(step)]
+            else:
+                raise IndexError(
+                    f"step={step} is out of range for the multi-step "
+                    f"gp_values_fn output of shape {nodal.shape}."
+                )
+        else:
+            row = nodal
+        return {int(nid): float(v) for nid, v in zip(node_ids, row)}
+
+    return _scalars
