@@ -12,26 +12,26 @@ Edge topology is shared with the deformed-mesh renderer
 segment, triangles three, quads four, hex bricks twelve. Anything else
 is skipped with a warning.
 
+**Phase 2.4 internals.** As of v1.10, :func:`plot_mesh` flows the
+edge rendering through ``Scene`` + ``MeshLayer`` + ``MplBackend``
+without changing the public signature or the visual output. Callers
+(including :meth:`ds.plot.mesh`) see exactly the same ``(ax, meta)``
+return; the refactor only matters when the layered architecture is
+exercised directly. See ``docs/viewer/00-roadmap.md`` Phase 2.4 and
+``docs/viewer/01-architecture.md`` §4.
+
 The public entry points sit on :class:`STKO_to_python.plotting.plot.Plot`
 (``ds.plot.mesh`` / ``ds.plot.mesh_with_contour``); this module is the
 implementation.
 """
 from __future__ import annotations
 
-import warnings
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
 
-from .deformed_shape import (
-    _autoscale_axes,
-    _build_segments,
-    _class_label,
-    _decide_3d,
-    _draw_segments,
-    _edge_topology,
-)
+from .deformed_shape import _autoscale_axes, _decide_3d
 
 if TYPE_CHECKING:
     from ..core.dataset import MPCODataSet
@@ -115,11 +115,17 @@ def plot_mesh(
         * ``is_3d`` — whether the axes are 3D
         * ``model_stage`` — passed through verbatim
     """
+    from ..viewer.backends.mpl.backend import MplBackend
+    from ..viewer.core import MPCODataSourceAdapter, Scene, SelectionSpec
+    from ..viewer.layers import MeshLayer
+
     df_nodes = dataset.nodes_info["dataframe"]
     df_elements = dataset.elements_info["dataframe"]
     if df_nodes.empty or df_elements.empty:
         raise ValueError("Dataset has no nodes or no elements to draw.")
 
+    # Apply the legacy filter early so the empty-after-filter error
+    # message names the original kwargs (preserves the v1.x contract).
     df_filtered = _filter_elements(
         df_elements, element_type=element_type, element_ids=element_ids
     )
@@ -129,51 +135,36 @@ def plot_mesh(
             f"{element_type!r}, element_ids={element_ids!r})."
         )
 
-    coord_lookup = {
-        int(row.node_id): np.array([row.x, row.y, row.z], dtype=np.float64)
-        for row in df_nodes.itertuples(index=False)
-    }
-
     is_3d = _decide_3d(df_filtered, df_nodes)
 
-    if ax is None:
-        import matplotlib.pyplot as plt
+    # Phase 2.4 rewire — drive the edge drawing through
+    # Scene / MeshLayer / MplBackend. The handle is pre-allocated by
+    # the backend so the caller-supplied ``ax`` is honoured and the
+    # default SceneStyle is **not** applied (which would mutate
+    # ``plt.rcParams["font.size"]`` as a side effect — the original
+    # ``plot_mesh`` never did that).
+    backend = MplBackend()
+    handle = backend.make_scene(is_3d=is_3d, ax=ax)
 
-        if is_3d:
-            fig = plt.figure()
-            ax = fig.add_subplot(111, projection="3d")
-        else:
-            fig, ax = plt.subplots()
+    source = MPCODataSourceAdapter(dataset)
+    scene = Scene(backend, source, is_3d=is_3d, handle=handle)
 
-    segs_per_class, edges_per_class, skipped = _build_segments(
-        df_elements=df_filtered, coord_lookup=coord_lookup
+    selection = SelectionSpec(
+        element_ids=tuple(int(eid) for eid in df_filtered["element_id"]),
     )
+    layer = MeshLayer(
+        selection=selection,
+        edge_color=edge_color,
+        linewidth=linewidth,
+        alpha=alpha,
+    )
+    scene.add(layer)
 
-    n_edges = 0
-    n_elements_drawn = 0
-    for label, segs in segs_per_class.items():
-        _draw_segments(
-            ax,
-            segs,
-            is_3d=is_3d,
-            color=edge_color,
-            linewidth=linewidth,
-            alpha=alpha,
-            zorder=1.0,
-        )
-        n_edges += int(segs.shape[0])
-        epe = edges_per_class.get(label, 0)
-        if epe:
-            n_elements_drawn += int(segs.shape[0] // epe)
-
-    if skipped:
-        warnings.warn(
-            "[mesh] Skipped element classes with unsupported topology: "
-            f"{skipped}",
-            RuntimeWarning,
-        )
-
-    coord_stack = np.stack(list(coord_lookup.values()))
+    # Axis cosmetics — the autoscale uses the full node cloud (matches
+    # the v1.x behaviour where a partial filter still framed the whole
+    # model).
+    ax = handle.ax
+    coord_stack = df_nodes[["x", "y", "z"]].to_numpy(dtype=np.float64)
     _autoscale_axes(ax, coord_stack, is_3d=is_3d)
 
     if not is_3d:
@@ -187,10 +178,10 @@ def plot_mesh(
         ax.set_title(title)
 
     meta: Dict[str, Any] = {
-        "n_edges": n_edges,
-        "n_elements_drawn": n_elements_drawn,
-        "edges_per_class": edges_per_class,
-        "skipped_classes": skipped,
+        "n_edges": layer.n_edges,
+        "n_elements_drawn": layer.n_elements_drawn,
+        "edges_per_class": layer.edges_per_class,
+        "skipped_classes": layer.skipped_classes,
         "is_3d": is_3d,
         "model_stage": model_stage,
     }
