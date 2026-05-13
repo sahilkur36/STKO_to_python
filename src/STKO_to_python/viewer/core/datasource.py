@@ -7,8 +7,9 @@ protocol — a future viewer source (e.g. a streaming OpenSeesPy
 adapter) only has to implement the protocol; the layers don't change.
 
 The concrete :class:`MPCODataSourceAdapter` lives in
-``viewer/core/_mpco_adapter.py`` and lands in Phase 2 step 2 alongside
-the first layer that consumes it.
+``viewer/core/_mpco_adapter.py`` (added in Phase 2.3); it is the
+default implementation that the layers landing in Phase 2.4 onward
+consume.
 
 See ``docs/viewer/01-architecture.md`` §5.
 """
