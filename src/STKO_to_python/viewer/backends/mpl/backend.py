@@ -292,7 +292,10 @@ class MplBackend:
         Handles three common cases:
 
         * ``LineCollection`` / ``Line3DCollection`` — replaces the
-          segment array via ``set_segments``.
+          segment array via ``set_segments``. 3-D segments (shape
+          ``(N, 2, 3)``) passed to a 2-D ``LineCollection`` are
+          z-dropped to ``(N, 2, 2)`` — same convention as
+          :meth:`add_segments` so layers can stay shape-agnostic.
         * ``PathCollection`` (scatter) — replaces the offsets via
           ``set_offsets`` (2-D) or ``set_offsets`` + ``set_3d_properties``
           (3-D).
@@ -300,7 +303,12 @@ class MplBackend:
           caller learns rather than silently dropping the update.
         """
         pts = np.asarray(points, dtype=np.float64)
-        if isinstance(actor, (LineCollection, Line3DCollection)):
+        if isinstance(actor, Line3DCollection):
+            actor.set_segments(pts)
+            return
+        if isinstance(actor, LineCollection):
+            if pts.ndim == 3 and pts.shape[-1] == 3:
+                pts = pts[:, :, :2]
             actor.set_segments(pts)
             return
         if isinstance(actor, PathCollection):
