@@ -12,6 +12,206 @@ spelled out in [`CLAUDE.md`](CLAUDE.md#versioning-policy):
 
 ## [Unreleased]
 
+## [1.12.0] — 2026-05-13
+
+Introduces the optional **viewer subpackage** — a renderer-agnostic
+`Scene` / `Layer` / `Backend` graph that drives both the existing
+matplotlib 2-D plotting (byte-identically, under the existing
+`ds.plot.*` API) and a new PyVista-backed 3-D rendering path
+(opt-in via the `[viewer-3d]` extra). The release consolidates the
+Phase 0 → Phase 3.0e work tracked in
+[`docs/viewer/00-roadmap.md`](docs/viewer/00-roadmap.md); the v1.10
+and v1.11 markers from the roadmap are folded into this single
+release rather than tagged separately.
+
+The lightweight install path (`pip install stko_to_python`) keeps
+the v1.8 footprint unchanged — numpy + pandas + matplotlib. Nothing
+from the viewer subpackage is imported until the user touches
+`STKO_to_python.viewer`, and even then the heavier optional
+dependencies (PyVista, VTK, PySide6) are only loaded when the
+corresponding extra is installed.
+
+### Added — optional extras and scaffold (Phase 0)
+
+- `STKO_to_python.viewer` subpackage with pinned schema versions
+  for forward-compatible saved sessions (`viewer._version`).
+- New optional extras in `pyproject.toml`:
+  - `[viewer-3d]` → `pyvista>=0.43`, `vtk>=9.2`
+  - `[viewer]` → `[viewer-3d]` + `PySide6>=6.5`, `pyvistaqt>=0.11`,
+    `qtpy`
+  - `[viewer-headless]` → `[viewer-3d]` + `imageio>=2.30`,
+    `imageio-ffmpeg>=0.4`
+  - `[viewer-web]` (Phase 6 placeholder) → `trame>=3.0`,
+    `trame-vtk`, `trame-vuetify`
+
+### Added — math algorithms (Phase 1)
+
+- `viewer.math.gauss_extrapolation` — `pinv`-based GP-to-corner
+  projection with cross-element averaging. `extrapolate_per_element`
+  and `extrapolate_to_nodes_averaged` cover the discrete-corner
+  and smooth-nodal extrapolation paths respectively.
+- `viewer.math.beam_frame` — beam local-frame helper (endpoint
+  coords + chord-vector heuristic). Fallback for datasets without
+  the primary `.cdata`-quaternion path.
+- `viewer.math.shell_frame` — shell mid-surface local-axes
+  quaternion. Avoids gimbal lock under deformation.
+- `viewer.math.picking` — vectorized world-to-display projection +
+  box-pick mask, parallel to apeGmsh's ~40× speed-up over
+  per-point `WorldToDisplay`.
+
+### Added — Scene / Layer / Backend / DataSource (Phase 2)
+
+- `viewer.core.Scene` orchestrates a `Backend`, a `DataSource`, and
+  an ordered list of `Layer`s. The opaque scene handle is allocated
+  lazily; callers may inject a pre-allocated handle (`handle=`) to
+  thread their own axes / plotter through.
+- `viewer.core.Backend` — runtime-checkable `Protocol` covering
+  scene lifecycle, primitives (`add_segments` / `add_points` /
+  `add_polygons` / `add_arrows`), in-place actor mutation
+  (`update_scalars` / `update_points` / `set_visible`), and output
+  (`show` / `save` / `snapshot`). `add_polygons` supports both
+  per-cell (`values=`) and per-vertex (`point_values=`) coloring;
+  passing both is a `ValueError`.
+- `viewer.core.Layer` — abstract base with the apeGmsh actor
+  lifecycle (`attach` allocates, `update_to_step` mutates in place,
+  `detach` releases). Subclass contracts pin the "no actor
+  recreation per step" perf rule.
+- `viewer.core.DataSource` — runtime-checkable protocol the layers
+  query for geometry, time axis, and selection resolution. The
+  default `MPCODataSourceAdapter` is the single boundary between
+  viewer code and STKO's pandas DataFrame world.
+- `viewer.core.SelectionSpec` — frozen, hashable selection spec
+  used as a layer's filter and as a cache key downstream. Mirrors
+  the existing `SelectionSetResolver` API so the adapter translates
+  1-to-1.
+- `viewer.core.SceneStyle` / `LayerStyle` — hierarchical style
+  dataclasses (extend the v1.x `PlotSettings`).
+
+### Added — matplotlib backend + 2-D layers (Phase 2.2 – 2.6)
+
+- `viewer.backends.mpl.MplBackend` — first concrete `Backend`,
+  pure matplotlib, no new dependencies. Maps every protocol
+  primitive onto matplotlib's 2-D + 3-D artist surface
+  (`LineCollection` / `Line3DCollection`, `PathCollection`,
+  `PolyCollection` / `Poly3DCollection`, `Quiver`). Symmetric
+  z-dropping for 2-D `LineCollection` updates so layers can stay
+  shape-agnostic. The optional `make_scene(ax=...)` backend-specific
+  extension threads a caller-supplied axes through.
+  `add_polygons(point_values=...)` raises
+  `BackendCapabilityError` per the directive's "no silent
+  fallback" rule — matplotlib's `PolyCollection` is per-cell only.
+- `viewer.layers.MeshLayer` — static element-edge wireframe;
+  powers the byte-identical rewire of `ds.plot.mesh` /
+  `ds.plot.undeformed_shape`.
+- `viewer.layers.DeformedMeshLayer` — time-varying edge wireframe
+  at `original + scale * displacement(step)`. Powers
+  `ds.plot.deformed_shape`. `update_to_step` re-fetches
+  displacement (cache-hit through the query engine) and updates
+  segment endpoints in place — same actor across animation steps.
+- `viewer.layers.NodeLayer` — point cloud at node positions,
+  optionally scalar-coloured by a nodal result (component selector
+  supports single-column **or** `"magnitude"`). All-or-nothing
+  validated at construction; `update_to_step` mutates scalars via
+  `backend.update_scalars`.
+- `viewer.layers.VectorLayer` — arrow glyphs at node positions,
+  driven by a nodal vector result. `n_components` defaults to 3
+  with zero-pad / truncate. `update_to_step` removes + re-adds the
+  arrow actor — documented Phase 3.X perf gap.
+- **Byte-identical refactors under the v1.x API**: `ds.plot.mesh`,
+  `ds.plot.undeformed_shape`, and `ds.plot.deformed_shape` keep
+  their signatures and visual output; the implementation now flows
+  through `Scene` + `Layer` + `MplBackend`. All
+  `tests/integration/test_mesh_plot.py` and
+  `test_deformed_shape.py` regression tests pass on the rewired
+  path.
+
+### Added — PyVista backend + ContourLayer (Phase 3.0a – 3.0e)
+
+- `viewer.backends.pyvista.PyVistaBackend` — second concrete
+  `Backend`, wraps `pyvista.Plotter` (windowed or off-screen).
+  Implements every primitive on the protocol; arrows raise
+  `BackendCapabilityError` on `update_points` /
+  `update_scalars` because the glyph filter is not cheaply
+  mutable. Off-screen rendering uses VTK's native off-screen path
+  (no Qt, no X server). Opaque `_PvActorRef` cookies carry the
+  actor + underlying dataset + bound scalar field so
+  `update_scalars` dispatches explicitly to `point_data` or
+  `cell_data`.
+- `viewer.layers.ContourLayer` — filled-face contour over the
+  model surface. Three topology modes covering all five paths of
+  apeGmsh's contour dispatch:
+
+  | Path | `topology=` | Helper |
+  |---|---|---|
+  | nodal | `"nodal"` | (caller-supplied) |
+  | cell | `"cell"` | (caller-supplied) |
+  | GP-cell-averaged | `"cell"` | (caller pre-aggregates) |
+  | GP-node-extrap-smooth | `"nodal"` | `make_gp_nodal_scalars` |
+  | GP-node-discrete | `"nodal_discrete"` | `make_gp_discrete_scalars` |
+
+  Tris / quads → 1 face; bricks → 6 quad faces with the same cell
+  value; lines skipped with `RuntimeWarning`. Auto-frozen `clim`
+  from attach-step data so the colorbar means the same thing
+  across animation steps.
+- `viewer.math.gauss_extrapolation.make_gp_nodal_scalars` —
+  closure factory wiring the GP-extrapolation kernel into the
+  nodal-smooth contour path.
+- `viewer.math.gauss_extrapolation.make_gp_discrete_scalars` —
+  parallel helper that skips the cross-element averaging step;
+  preserves field discontinuity at element boundaries.
+- Both helpers accept single-step `(n_total_gp,)` or multi-step
+  batch `(T, n_total_gp)` returns from `gp_values_fn`. Out-of-range
+  step raises `IndexError`; 0-D scalar input raises `ValueError`.
+
+### Test coverage
+
+The viewer subpackage carries ~350 new tests under `tests/viewer/`:
+
+- `tests/viewer/math/` — 35 tests covering the gauss-extrapolation
+  algorithms, beam-frame fallback, shell-frame quaternion,
+  picking projection.
+- `tests/viewer/core/` — protocol-conformance, scene-style
+  hierarchy, selection-spec hashability, MPCO adapter against a
+  real `MPCODataSet` fixture.
+- `tests/viewer/backends/mpl/` — 33 tests covering every primitive
+  in 2-D and 3-D, capability-error contracts, in-place updates.
+- `tests/viewer/backends/pyvista/` — 29 tests gated on the
+  `[viewer-3d]` extra via `pytest.importorskip`.
+- `tests/viewer/layers/` — 100+ tests across `MeshLayer`,
+  `DeformedMeshLayer`, `NodeLayer`, `VectorLayer`, and
+  `ContourLayer` (cell / nodal / nodal_discrete topologies, with
+  PyVista integration tests proving the same Scene + layer code
+  runs against both backends).
+- Every existing `tests/integration/test_mesh_plot.py` and
+  `test_deformed_shape.py` regression test passes byte-identically
+  on the rewired implementation.
+
+Full suite under system Python (no pyvista): **1629 passed, 54
+skipped** (skips are fixture-availability + the pyvista-gated
+modules).
+
+### Out of scope (v1.13 candidates)
+
+- **`XYLayer`** wrapping `NodalResultsPlotter.xy` and a
+  `ScatterLayer` wrapping `ElementResultsPlotter.scatter`. The
+  former does its own aggregation and emits a plain `ax.plot()`
+  that doesn't benefit from the Scene/Layer machinery; the latter
+  is used by `ds.plot.mesh_with_contour` and would close the
+  byte-identical refactor for that entry point.
+- **`Plot.beam_solids` / `beam_solids_deformed`** rewires —
+  involved extruded-section geometry; defer.
+- **Phase 3.X layers** beyond ContourLayer: `GaussLayer` (IP
+  markers in 3-D), `VolumeLayer` (points / slice / iso),
+  `DiagramLayer` (line-element M/V/N), `FiberLayer` (force-based
+  beam fiber sections), `LayerStackLayer` (through-thickness shell
+  views), `ZeroLengthLayer`, `ClippingLayer` (plugs into the
+  v1.7+ `cuts/`).
+- **`viewer.scene_3d.fem_scene`** — `MPCODataSet` →
+  `pyvista.UnstructuredGrid` builder so multiple layers can share
+  one mesh substrate.
+- **Phase 4 (Qt desktop UI)**, **Phase 5 (headless CLI)**, and
+  **Phase 6 (Trame web)** — see the roadmap.
+
 ## [1.8.0] — 2026-05-12
 
 Extends v1.7 with **higher-order solid section cuts** (20- and 27-node
