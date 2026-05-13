@@ -26,8 +26,15 @@ contracts are exercised in unit tests ahead of the 3-D work.
 """
 from __future__ import annotations
 
+from .contour import ContourLayer
 from .deformed_mesh import DeformedMeshLayer
 from .mesh import MeshLayer
 from .node import NodeLayer, VectorLayer
 
-__all__ = ["DeformedMeshLayer", "MeshLayer", "NodeLayer", "VectorLayer"]
+__all__ = [
+    "ContourLayer",
+    "DeformedMeshLayer",
+    "MeshLayer",
+    "NodeLayer",
+    "VectorLayer",
+]
